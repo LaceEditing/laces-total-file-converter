@@ -29,7 +29,7 @@ from tkinter import font as tkFont, PhotoImage, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 # Application Constants
-CURRENT_VERSION = "1.1.5"
+CURRENT_VERSION = "1.2.0"
 ITCH_GAME_URL = "https://laceediting.itch.io/laces-total-file-converter"
 ITCH_API_KEY = "TLSrZ5K4iHauDMTTqS9xfpBAx1Tsc6NPgTFrvcgj"
 ITCH_GAME_ID = "3268562"
@@ -48,6 +48,8 @@ youtube_status_label = None
 gpu_var = None
 format_var = None
 progress_var = None
+youtube_format_var = None
+youtube_quality_var = None
 app = None
 
 # =================================
@@ -60,9 +62,7 @@ def safe_update_ui(func) -> None:
     else:
         def update():
             eval(func)
-
         app.after(0, update)
-
 
 def resource_path(relative_path: str) -> str:
     """Get absolute path to resource, works for dev and for PyInstaller."""
@@ -70,14 +70,21 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.dirname(__file__), relative_path)
 
-def is_valid_youtube_url(url: str) -> bool:
-    """Validate if a given URL is a valid YouTube URL."""
+def is_valid_url(url: str) -> bool:
+    """Validate if a given URL is from a supported platform."""
     try:
         parsed_url = urlparse(url)
+        supported_domains = [
+            'youtube.com', 'youtu.be',
+            'twitter.com', 'x.com',
+            'tiktok.com',
+            'dailymotion.com', 'dai.ly',
+            'vimeo.com'
+        ]
         return bool(
             parsed_url.scheme and
             parsed_url.netloc and
-            ('youtube.com' in parsed_url.netloc or 'youtu.be' in parsed_url.netloc)
+            any(domain in parsed_url.netloc for domain in supported_domains)
         )
     except:
         return False
@@ -442,30 +449,44 @@ def select_output_folder() -> None:
     output_folder_entry.delete(0, tk.END)
     output_folder_entry.insert(0, folder_selected)
 
+
 def start_conversion() -> None:
     """Start the conversion process."""
     input_paths = input_entry.get().strip().split(";")
     output_folder = output_folder_entry.get().strip()
-    output_format = format_var.get()
+    output_format = format_dropdown.get()  # Get format directly from dropdown
 
-    if not input_paths or not output_folder:
+    # Input validation
+    if not input_paths or not input_paths[0]:
         messagebox.showerror(
             "Error",
-            "Please select input and output paths.",
+            "Please select input files.",
             parent=app
         )
         return
 
-    if output_format not in ["wav", "ogg", "flac", "mp3", "mp4", "avi", "mov"]:
+    if not output_folder:
         messagebox.showerror(
             "Error",
-            "Invalid format. Please select a valid format.",
+            "Please select an output folder.",
+            parent=app
+        )
+        return
+
+    # Format validation
+    valid_formats = ["wav", "ogg", "flac", "mp3", "mp4", "avi", "mov"]
+    if not output_format or output_format not in valid_formats:
+        messagebox.showerror(
+            "Error",
+            "Please select a valid output format.",
             parent=app
         )
         return
 
     use_gpu = gpu_var.get()
     progress_var.set(0)
+
+    print(f"Starting conversion with format: {output_format}")  # Debug output
 
     def conversion_thread():
         convert_audio(input_paths, output_folder, output_format, progress_var, convert_button, use_gpu)
@@ -491,8 +512,72 @@ def toggle_interface(enabled: bool = True) -> None:
 #=================================
 # YouTube Functions
 #=================================
+def get_format_string(quality, format_type):
+    """Generate the yt-dlp format string based on quality and format selection."""
+    audio_formats = ["mp3", "wav", "flac", "ogg"]
+
+    if format_type in audio_formats:
+        return "bestaudio/best"
+
+    quality_map = {
+        "Best": "bestvideo",
+        "4K": "bestvideo[height<=2160]",
+        "1440p": "bestvideo[height<=1440]",
+        "1080p": "bestvideo[height<=1080]",
+        "720p": "bestvideo[height<=720]",
+        "480p": "bestvideo[height<=480]"
+    }
+
+    video_format = quality_map.get(quality, "bestvideo[height<=1080]")
+    return f"{video_format}[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"
+
+
+def modify_download_options(ydl_opts, quality, format_type):
+    """Modify yt-dlp options based on quality and format selections."""
+    audio_formats = ["mp3", "wav", "flac", "ogg"]
+
+    if format_type in audio_formats:
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': format_type,
+                'preferredquality': '192'
+            }],
+            'extractaudio': True,
+            'addmetadata': True
+        })
+
+        # Remove the 'acodec' parameter as it's not needed
+        if format_type == 'wav':
+            ydl_opts['postprocessors'][0]['preferredquality'] = '192K'
+        elif format_type == 'flac':
+            ydl_opts['postprocessors'][0]['preferredquality'] = '192K'
+        elif format_type == 'ogg':
+            ydl_opts['postprocessors'][0]['preferredquality'] = '192K'
+
+        # Ensure correct extension in output filename
+        if 'outtmpl' not in ydl_opts:
+            ydl_opts['outtmpl'] = '%(title)s.%(ext)s'
+
+        # Remove any video-specific options
+        ydl_opts.pop('merge_output_format', None)
+
+    else:
+        # Handle video formats
+        ydl_opts['format'] = get_format_string(quality, format_type)
+        ydl_opts['merge_output_format'] = format_type.lower()
+        ydl_opts['postprocessors'] = [
+            {'key': 'FFmpegMerger'},
+            {'key': 'FFmpegMetadata'}
+        ]
+
+    return ydl_opts
+
+
 def yt_dlp_progress_hook(d: dict) -> None:
     """Progress hook for YouTube downloads."""
+
     def update():
         if d['status'] == 'downloading':
             p = d.get('_percent_str', '').strip()
@@ -520,15 +605,35 @@ def yt_dlp_progress_hook(d: dict) -> None:
 
     safe_update_ui(update)
 
-def download_youtube() -> None:
-    """Handle YouTube video/playlist downloads."""
+
+def download_video() -> None:
+    """Handle video downloads from various platforms."""
+    global youtube_format_var, youtube_quality_var
+
     input_url = youtube_link_entry.get().strip()
     if not input_url:
-        messagebox.showerror("Error", "Please provide a YouTube URL.")
+        messagebox.showerror("Error", "Please provide a video URL.")
         return
 
-    if not is_valid_youtube_url(input_url):
-        messagebox.showerror("Error", "Please provide a valid YouTube URL.")
+    def is_valid_url(input_url):
+        supported_domains = [
+            'youtube.com', 'youtu.be',
+            'twitter.com', 'x.com',
+            'tiktok.com',
+            'dailymotion.com', 'dai.ly',
+            'vimeo.com',
+            'instagram.com/reels', 'instagram.com/reel'
+        ]
+        try:
+            parsed_url = urlparse(input_url)
+            cleaned_path = parsed_url.path.split('?')[0]  # Remove query parameters
+            return any(domain in parsed_url.netloc + cleaned_path for domain in supported_domains)
+        except Exception as e:
+            return False
+
+    if not is_valid_url(input_url):
+        supported_platforms = ['YouTube', 'Twitter', 'TikTok', 'Dailymotion', 'Vimeo', 'Instagram Reels']
+        messagebox.showerror("Error", f"Please provide a valid video URL from a supported platform: {', '.join(supported_platforms)}.")
         return
 
     output_folder = output_folder_entry.get().strip()
@@ -536,120 +641,80 @@ def download_youtube() -> None:
         messagebox.showerror("Error", "Please select an output folder.")
         return
 
-    toggle_interface(False)
-    youtube_status_label.config(text="Analyzing video URL...")
-    app.update_idletasks()
+    try:
+        format_type = youtube_format_var.get()
+        quality = youtube_quality_var.get()
+    except Exception as e:
+        messagebox.showerror("Error", "Failed to get format or quality settings. Please try again.")
+        return
+
+    # Check if URL is a playlist
+    if 'list=' in input_url:
+        if 'watch?v=' in input_url:
+            response = messagebox.askyesnocancel(
+                "Playlist Detected",
+                "This link is part of a playlist. Would you like to download the entire playlist or just this video?\n\n"
+                "Yes - Download entire playlist\n"
+                "No - Download only this video\n"
+                "Cancel - Do nothing"
+            )
+            if response is None:
+                return  # User selected cancel, exit function
+            elif response:
+                download_url = input_url  # Download entire playlist
+            else:
+                download_url = input_url.split('&list=')[0]  # Download only the video
+        else:
+            if not messagebox.askyesno("Playlist Detected", "This is a playlist link. Would you like to download the entire playlist?"):
+                return  # User selected no, exit function
+            download_url = input_url  # Download entire playlist
+    else:
+        download_url = input_url
 
     def download_thread():
         try:
-            download_url = input_url
-            is_direct_playlist = download_url.startswith('https://www.youtube.com/playlist?list=')
-            playlist_id = None
+            ydl_opts = {
+                'paths': {'home': output_folder, 'temp': output_folder},
+                'outtmpl': '%(title)s.%(ext)s',
+                'progress_hooks': [yt_dlp_progress_hook],
+                'ignoreerrors': True,
+                'geo_bypass': True,
+                'geo_bypass_country': 'US',
+                'overwrites': True,
+            }
 
-            # Handle direct playlist URLs
-            if is_direct_playlist:
-                with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-                    playlist_info = ydl.extract_info(download_url, download=False)
-                    if not messagebox.askyesno(
-                            "Playlist Download",
-                            f"This playlist contains {len(playlist_info['entries'])} videos.\nDo you want to download the entire playlist?",
-                            parent=app
-                    ):
-                        safe_update_ui(lambda: toggle_interface(True))
-                        return
+            ydl_opts = modify_download_options(ydl_opts, quality, format_type)
 
-            # Handle URLs with playlist parameters
-            elif '&list=' in download_url:
-                try:
-                    playlist_id = download_url.split('&list=')[1].split('&')[0]
-                    playlist_url = f'https://www.youtube.com/playlist?list={playlist_id}'
-
-                    with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-                        playlist_info = ydl.extract_info(playlist_url, download=False)
-
-                        choice = messagebox.askyesnocancel(
-                            "PLAYLIST DETECTED! ALERT!",
-                            f"This video is part of a playlist with {len(playlist_info['entries'])} videos.\n"
-                            f"Would you like to:\n"
-                            f"- Click 'Yes' to download the entire playlist\n"
-                            f"- Click 'No' to download only this video\n"
-                            f"- Click 'Cancel' to run away",
-                            parent=app
-                        )
-
-                        if choice is None:
-                            safe_update_ui(lambda: toggle_interface(True))
-                            return
-
-                        if choice:  # User chose to download playlist
-                            download_url = playlist_url
-                        else:  # User chose to download single video
-                            download_url = download_url.split('&list=')[0]
-                except IndexError:
-                    safe_update_ui(lambda: messagebox.showerror("Error", "Invalid playlist URL format"))
-                    safe_update_ui(lambda: toggle_interface(True))
-                    return
-
-            # Set up download options
-            if download_url.startswith('https://www.youtube.com/playlist?list='):
-                safe_update_ui(lambda: youtube_status_label.config(text="Downloading playlist..."))
-                ydl_opts = {
-                    'paths': {'home': output_folder, 'temp': output_folder},
-                    'outtmpl': '%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s',
-                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
-                    'merge_output_format': 'mp4',
-                    'noplaylist': False,
-                    'progress_hooks': [yt_dlp_progress_hook],
-                    'postprocessors': [
-                        {'key': 'FFmpegMerger'},
-                        {'key': 'FFmpegMetadata'}
-                    ],
-                    'ignoreerrors': True,
-                    'geo_bypass': True,
-                    'geo_bypass_country': 'US'
-                }
-            else:
-                safe_update_ui(lambda: youtube_status_label.config(text="Downloading single video..."))
-                ydl_opts = {
-                    'paths': {'home': output_folder, 'temp': output_folder},
-                    'outtmpl': '%(title)s.%(ext)s',
-                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
-                    'merge_output_format': 'mp4',
-                    'noplaylist': True,
-                    'progress_hooks': [yt_dlp_progress_hook],
-                    'postprocessors': [
-                        {'key': 'FFmpegMerger'},
-                        {'key': 'FFmpegMetadata'}
-                    ],
-                    'geo_bypass': True,
-                    'geo_bypass_country': 'US'
-                }
-
-            # Execute download
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([download_url])
 
             safe_update_ui(lambda: youtube_status_label.config(text="Download Complete!"))
-            if messagebox.askyesno("Success!", "Do you wanna open the output folder?"):
+            if messagebox.askyesno("Success!", "Would you like to open the output folder?"):
                 os.startfile(output_folder)
 
-        except Exception as e:
-            error_msg = str(e)
-            if "WinError 2" in error_msg:
-                safe_update_ui(lambda: youtube_status_label.config(text="Download Complete! ^.^"))
-                if messagebox.askyesno("Success!", "Do you want to open the output folder?"):
-                    os.startfile(output_folder)
-            else:
-                safe_update_ui(lambda: youtube_status_label.config(text="Error occurred!"))
-                safe_update_ui(lambda: messagebox.showerror("Duplication Error!",
-                    f"Whatever you just tried to download is already in the folder lol"))
-
+        except yt_dlp.utils.DownloadError as download_error:
+            safe_update_ui(lambda: youtube_status_label.config(text="Download failed!"))
+            safe_update_ui(lambda error=download_error: messagebox.showerror(
+                "Download Error",
+                f"Failed to download video: {str(error)}"
+            ))
+        except Exception as general_error:
+            safe_update_ui(lambda: youtube_status_label.config(text="Error occurred!"))
+            safe_update_ui(lambda error=general_error: messagebox.showerror(
+                "Error",
+                f"An unexpected error occurred: {str(error)}"
+            ))
         finally:
             safe_update_ui(lambda: toggle_interface(True))
             safe_update_ui(lambda: convert_button.config(text="CONVERT", fg="white"))
 
+    toggle_interface(False)
+    youtube_status_label.config(text="Processing URL...")
+    app.update_idletasks()
+
     thread = threading.Thread(target=download_thread, daemon=True)
     thread.start()
+
 
 # =================================
 # Main Application Setup
@@ -664,23 +729,20 @@ def setup_fonts() -> tuple:
 
 def setup_main_window() -> None:
     """Initialize the main application window."""
-    # Handle PyInstaller binaries
     if hasattr(sys, "_MEIPASS"):
         tcl_dnd_path = os.path.join(sys._MEIPASS, "tkinterdnd2", "tkdnd", "win-x64")
         os.environ["TCLLIBPATH"] = tcl_dnd_path
         print("Set TCLLIBPATH to", tcl_dnd_path)
 
-    # Configure the main window
     icon_path = resource_path(os.path.join('../assets', 'icons', 'icon.png'))
     icon_img = PhotoImage(file=icon_path)
     app.iconphoto(False, icon_img)
     app.title(f"Hey besties let's convert those files (v{CURRENT_VERSION})")
     app.configure(bg="#E6E6FA")
-    app.geometry("700x400")
-    app.minsize(900, 450)
+    app.geometry("700x550")  # Increased height to accommodate new options
+    app.minsize(900, 800)
     app.resizable(True, True)
 
-    # Set up drag and drop
     app.call('wm', 'iconphoto', app._w, '-default', icon_img)
     app.drop_target_register(DND_FILES)
     app.dnd_bind("<<Drop>>", on_drop)
@@ -696,78 +758,145 @@ def create_ui_components() -> None:
     add_update_menu(app, menubar)
     setup_auto_update_checker(app)
 
-    # Header Section
-    header_label = tk.Label(app, text="Lace's Total File Converter",
-                            font=title_font, bg="#E6E6FA", fg="#6A0DAD")
-    header_label.grid(row=0, column=0, columnspan=3, pady=20, sticky="ew")
-
     # Assign to global variables
     global input_entry, output_folder_entry, youtube_link_entry, format_dropdown
-    global convert_button, gpu_checkbox, youtube_status_label
+    global convert_button, gpu_checkbox, youtube_status_label, progress_var
+    global youtube_format_var, youtube_quality_var  # Add these global declarations
 
-    # Input File Section
-    tk.Label(app, text="Input Files:", bg="#E6E6FA", font=regular_font).grid(
-        row=1, column=0, padx=10, pady=5, sticky="ew")
-    input_entry = tk.Entry(app, width=50, font=regular_font)
-    input_entry.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
-    tk.Button(app, text="Browse", command=select_input,
+    # Initialize the variables before creating the UI elements
+    youtube_format_var = tk.StringVar(value="mp4")
+    youtube_quality_var = tk.StringVar(value="1080p")
+
+    # Main Container Frame
+    main_frame = tk.Frame(app, bg="#E6E6FA")
+    main_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+    main_frame.grid_columnconfigure(0, weight=1)
+
+    # Header Section
+    header_label = tk.Label(main_frame, text="Lace's Total File Converter",
+                            font=title_font, bg="#E6E6FA", fg="#6A0DAD")
+    header_label.grid(row=0, column=0, columnspan=3, pady=(0, 20), sticky="ew")
+
+    # Output Folder Section (Shared)
+    output_frame = tk.LabelFrame(main_frame, text="Output Location", bg="#E6E6FA",
+                                 font=regular_font, fg="#6A0DAD", pady=10)
+    output_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 20))
+    output_frame.grid_columnconfigure(1, weight=1)
+
+    tk.Label(output_frame, text="Output Folder:", bg="#E6E6FA", font=regular_font).grid(
+        row=0, column=0, padx=10, pady=10, sticky="w")
+    output_folder_entry = tk.Entry(output_frame, width=50, font=regular_font)
+    output_folder_entry.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+    tk.Button(output_frame, text="Browse", command=select_output_folder,
               bg="#DDA0DD", fg="white", font=regular_font).grid(
-        row=1, column=2, padx=10, pady=5)
+        row=0, column=2, padx=10, pady=10)
 
-    # Output Folder Section
-    tk.Label(app, text="Output Folder:", bg="#E6E6FA", font=regular_font).grid(
-        row=2, column=0, padx=10, pady=5, sticky="ew")
-    output_folder_entry = tk.Entry(app, width=50, font=regular_font)
-    output_folder_entry.grid(row=2, column=1, padx=10, pady=5, sticky="ew")
-    tk.Button(app, text="Browse", command=select_output_folder,
+    # Video Download Section (formerly YouTube Download Section)
+    video_frame = tk.LabelFrame(main_frame, text="Video Download", bg="#E6E6FA",
+                                font=regular_font, fg="#6A0DAD", pady=10)
+    video_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 20))
+    video_frame.grid_columnconfigure(1, weight=1)
+
+    # Video Link Row
+    tk.Label(video_frame, text="Video URL:", bg="#E6E6FA", font=regular_font).grid(
+        row=0, column=0, padx=10, pady=5, sticky="w")
+    youtube_link_entry = tk.Entry(video_frame, width=50, font=regular_font)
+    youtube_link_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
+
+    # Add supported platforms label
+    supported_platforms = tk.Label(video_frame,
+                                   text="Supported: YouTube, Twitter, TikTok, Instagram, Dailymotion, Vimeo",
+                                   bg="#E6E6FA", font=regular_font, fg="#666666")
+    supported_platforms.grid(row=1, column=0, columnspan=3, pady=(0, 5), sticky="w", padx=10)
+
+    # Video Options Row
+    options_frame = tk.Frame(video_frame, bg="#E6E6FA")
+    options_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=5)
+    options_frame.grid_columnconfigure(1, weight=1)
+    options_frame.grid_columnconfigure(3, weight=1)
+
+    tk.Label(options_frame, text="Format:", bg="#E6E6FA", font=regular_font).grid(
+        row=0, column=0, padx=10, sticky="w")
+    youtube_format_var = tk.StringVar(value="mp4")
+    youtube_format_dropdown = ttk.Combobox(
+        options_frame,
+        textvariable=youtube_format_var,
+        values=["mp4", "avi", "mp3", "wav", "flac", "ogg"],
+        font=regular_font,
+        state="readonly"
+    )
+    youtube_format_dropdown.grid(row=0, column=1, padx=10, sticky="ew")
+
+    tk.Label(options_frame, text="Quality:", bg="#E6E6FA", font=regular_font).grid(
+        row=0, column=2, padx=10, sticky="w")
+    youtube_quality_var = tk.StringVar(value="1080p")
+    youtube_quality_dropdown = ttk.Combobox(
+        options_frame,
+        textvariable=youtube_quality_var,
+        values=["Best", "4K", "1440p", "1080p", "720p", "480p"],
+        font=regular_font,
+        state="readonly"
+    )
+    youtube_quality_dropdown.grid(row=0, column=3, padx=10, sticky="ew")
+
+    # Download Button
+    tk.Button(video_frame, text="DOWNLOAD", command=download_video,
+              bg="#9370DB", fg="white", font=regular_font).grid(
+        row=3, column=0, columnspan=3, pady=10, sticky="ew")
+
+    # File Conversion Section
+    conversion_frame = tk.LabelFrame(main_frame, text="File Conversion", bg="#E6E6FA",
+                                     font=regular_font, fg="#6A0DAD", pady=10)
+    conversion_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 20))
+    conversion_frame.grid_columnconfigure(1, weight=1)
+
+    # Input File Row
+    tk.Label(conversion_frame, text="Input Files:", bg="#E6E6FA", font=regular_font).grid(
+        row=0, column=0, padx=10, pady=5, sticky="w")
+    input_entry = tk.Entry(conversion_frame, width=50, font=regular_font)
+    input_entry.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
+    tk.Button(conversion_frame, text="Browse", command=select_input,
               bg="#DDA0DD", fg="white", font=regular_font).grid(
-        row=2, column=2, padx=10, pady=5)
+        row=0, column=2, padx=10, pady=5)
 
-    # Output Format Section
-    tk.Label(app, text="Output Format:", bg="#E6E6FA", font=regular_font).grid(
-        row=3, column=0, padx=10, pady=5, sticky="ew")
-    format_var = tk.StringVar()
+    # Conversion Format Row
+    tk.Label(conversion_frame, text="Output Format:", bg="#E6E6FA", font=regular_font).grid(
+        row=1, column=0, padx=10, pady=5, sticky="w")
+    format_var = tk.StringVar(value="mp4")
     format_dropdown = ttk.Combobox(
-        app,
+        conversion_frame,
         textvariable=format_var,
         values=["wav", "ogg", "flac", "mp3", "mp4", "avi", "mov"],
-        font=regular_font
+        font=regular_font,
+        state="readonly"
     )
-    format_dropdown.grid(row=3, column=1, padx=10, pady=5, sticky="ew")
-
-    # YouTube Link Section
-    tk.Label(app, text="YouTube Link:", bg="#E6E6FA", font=regular_font).grid(
-        row=4, column=0, padx=10, pady=5, sticky="ew")
-    youtube_link_entry = tk.Entry(app, width=50, font=regular_font)
-    youtube_link_entry.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
-    tk.Button(app, text="Download", command=download_youtube,
-              bg="#DDA0DD", fg="white", font=regular_font).grid(
-        row=4, column=2, padx=10, pady=5)
+    format_dropdown.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
 
     # Convert Button Section
-    progress_var = tk.IntVar()
-    convert_button = tk.Button(app, text="CONVERT", command=start_conversion,
+    convert_button = tk.Button(conversion_frame, text="CONVERT", command=start_conversion,
                                bg="#9370DB", fg="white", font=regular_font)
-    convert_button.grid(row=5, column=0, columnspan=3, pady=10, sticky="ew")
+    convert_button.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew")
 
-    # GPU Configuration Section
+    # GPU Checkbox and Status Section
+    bottom_frame = tk.Frame(main_frame, bg="#E6E6FA")
+    bottom_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+    bottom_frame.grid_columnconfigure(0, weight=1)
+
     global gpu_var
     gpu_var = tk.BooleanVar(value=True)
     gpu_checkbox = tk.Checkbutton(
-        app, text="GPU Encode (Significantly Faster)", bg="#E6E6FA",
+        bottom_frame, text="GPU Encode (Significantly Faster)", bg="#E6E6FA",
         font=regular_font, variable=gpu_var
     )
-    gpu_checkbox.grid(row=6, column=0, columnspan=3, pady=5, sticky="ew")
+    gpu_checkbox.grid(row=0, column=0, pady=5, sticky="ew")
 
-    # YouTube Status Section
-    youtube_status_label = tk.Label(text="YouTube Status: Idle",
+    youtube_status_label = tk.Label(bottom_frame, text="Status: Idle",
                                     bg="#E6E6FA", font=regular_font)
-    youtube_status_label.grid(row=7, column=0, columnspan=3, pady=5, sticky="ew")
+    youtube_status_label.grid(row=1, column=0, pady=5, sticky="ew")
 
-    # Configure grid weights
+    # Configure main window grid weights
+    app.grid_rowconfigure(0, weight=1)
     app.grid_columnconfigure(0, weight=1)
-    app.grid_columnconfigure(1, weight=1)
-    app.grid_columnconfigure(2, weight=1)
 
 
 # =================================
