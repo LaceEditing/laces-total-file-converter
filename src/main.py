@@ -751,6 +751,7 @@ def create_ui_components() -> None:
     convert_button.grid(row=5, column=0, columnspan=3, pady=10, sticky="ew")
 
     # GPU Configuration Section
+    global gpu_var
     gpu_var = tk.BooleanVar(value=True)
     gpu_checkbox = tk.Checkbutton(
         app, text="GPU Encode (Significantly Faster)", bg="#E6E6FA",
