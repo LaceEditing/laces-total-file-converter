@@ -1,6 +1,4 @@
-﻿#!/usr/bin/env python3
-
-# =================================
+﻿# =================================
 # Imports and Constants
 # =================================
 
@@ -19,6 +17,7 @@ import requests
 import webbrowser
 import packaging.version as version
 import yt_dlp
+import pydub
 from pydub import AudioSegment
 from moviepy.editor import VideoFileClip
 
@@ -28,8 +27,11 @@ from tkinter import filedialog, messagebox, simpledialog
 from tkinter import font as tkFont, PhotoImage, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+# Log imports
+import traceback
+
 # Application Constants
-CURRENT_VERSION = "1.2.0"
+CURRENT_VERSION = "1.3.8"
 ITCH_GAME_URL = "https://laceediting.itch.io/laces-total-file-converter"
 ITCH_API_KEY = "TLSrZ5K4iHauDMTTqS9xfpBAx1Tsc6NPgTFrvcgj"
 ITCH_GAME_ID = "3268562"
@@ -55,6 +57,58 @@ app = None
 # =================================
 # Utility Functions
 # =================================
+def log_errors():
+    with open("error_log.txt", "w") as f:
+        f.write(traceback.format_exc())
+
+# Add error handling and logging
+def get_ffmpeg_path():
+    """
+    Get the correct path to the FFmpeg executable, handling both development
+    and packaged environments.
+    """
+    if getattr(sys, 'frozen', False):
+        # We're in a PyInstaller bundle
+        base_path = sys._MEIPASS
+        possible_paths = [
+            os.path.join(base_path, 'ffmpeg', 'ffmpeg.exe'),
+            os.path.join(base_path, 'ffmpeg.exe'),
+            os.path.join(os.path.dirname(sys.executable), 'ffmpeg.exe')
+        ]
+
+        # Print all paths we're checking (helps with debugging)
+        print("Checking FFmpeg paths:")
+        for path in possible_paths:
+            print(f"- {path}")
+            if os.path.exists(path):
+                print(f"Found FFmpeg at: {path}")
+                return path
+
+        # If we get here, we couldn't find FFmpeg
+        raise FileNotFoundError(
+            "FFmpeg not found in any expected location:\n" +
+            "\n".join(f"- {p}" for p in possible_paths)
+        )
+    else:
+        # Development environment - check if FFmpeg is in PATH
+        if sys.platform == 'win32':
+            # For Windows, explicitly look for ffmpeg.exe
+            from shutil import which
+            ffmpeg_path = which('ffmpeg.exe')
+            if ffmpeg_path:
+                return ffmpeg_path
+            raise FileNotFoundError(
+                "FFmpeg not found in PATH. Please ensure FFmpeg is installed "
+                "and added to your system PATH."
+            )
+        return "ffmpeg"  # For non-Windows development environments
+
+
+FFMPEG_PATH = get_ffmpeg_path()
+
+# Use the FFMPEG_PATH in your subprocess command
+subprocess.run([FFMPEG_PATH, "-version"], check=True)
+
 def safe_update_ui(func) -> None:
     """Safely update UI elements from any thread."""
     if not isinstance(func, str):
@@ -88,6 +142,13 @@ def is_valid_url(url: str) -> bool:
         )
     except:
         return False
+
+def initialize_pydub():
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+        pydub.AudioSegment.converter = os.path.join(base_path, 'ffmpeg.exe')
+        pydub.AudioSegment.ffmpeg = os.path.join(base_path, 'ffmpeg.exe')
+        pydub.AudioSegment.ffprobe = os.path.join(base_path, 'ffprobe.exe')
 
 # =================================
 # Update System Functions
@@ -191,165 +252,323 @@ def add_update_menu(app, menubar) -> None:
 #=================================
 # Core Application Logic
 #=================================
-def direct_ffmpeg_gpu_video2video(input_path: str, output_path: str) -> None:
-    """Execute FFmpeg command for GPU-accelerated video conversion."""
-    cmd = [
-        "ffmpeg",
-        "-hwaccel", "cuda",
-        "-hwaccel_output_format", "cuda",
-        "-i", input_path,
-        "-c:v", "h264_nvenc",
-        "-preset", "p1",
-        "-tune", "hq",
-        "-rc", "vbr",
-        "-cq", "23",
-        "-b:v", "0",
-        "-maxrate", "130M",
-        "-bufsize", "130M",
-        "-spatial-aq", "1",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-y",
-        output_path
-    ]
-    print("Running ffmpeg command:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+def direct_ffmpeg_gpu_video2video(input_path: str, output_path: str, output_format: str) -> None:
+    """Execute FFmpeg command for video conversion with fallback to CPU if GPU fails."""
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        print(f"Using FFmpeg from: {ffmpeg_path}")
 
-def convert_audio(input_paths: list, output_folder: str, output_format: str,
-                 progress_var: tk.IntVar, convert_button: tk.Button, use_gpu: bool) -> None:
-    """Convert audio/video files to the specified format."""
-    os.makedirs(output_folder, exist_ok=True)
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    audio_formats = ["wav", "ogg", "flac", "mp3"]
-    video_formats = ["mp4", "avi", "mov"]
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    def update_button(text: str, bg: str = "#D8BFD8") -> None:
-        safe_update_ui(lambda: convert_button.config(text=text, bg=bg, fg="white"))
-
-    def update_status(text: str) -> None:
-        safe_update_ui(lambda: youtube_status_label.config(text=text))
-
-    update_button("Converting...")
-    total_files = len(input_paths)
-
-    for idx, input_path in enumerate(input_paths, start=1):
-        file_name = os.path.basename(input_path)
-        input_extension = os.path.splitext(file_name)[1][1:].lower()
-        output_file_name = os.path.splitext(file_name)[0] + f'.{output_format}'
-        output_path = os.path.join(output_folder, output_file_name)
-
-        update_status(f"Converting file {idx}/{total_files}: {file_name}")
-
-        # Handle invalid conversion attempt (audio to video)
-        if input_extension in audio_formats and output_format in video_formats:
-            update_button("Convert", "#9370DB")
-            success = app.after(0, punish_user_with_maths)
-            if not success:
-                return
-            update_button("Convert", "#9370DB")
-            return
+        # First attempt - with GPU acceleration
+        if output_format.lower() == "avi":
+            gpu_cmd = [
+                ffmpeg_path,
+                "-hwaccel", "cuda",
+                "-i", input_path,
+                "-c:v", "mpeg4",
+                "-q:v", "5",
+                "-c:a", "mp3",
+                "-y",
+                output_path
+            ]
+        else:  # mp4 and other formats
+            gpu_cmd = [
+                ffmpeg_path,
+                "-hwaccel", "cuda",
+                "-hwaccel_output_format", "cuda",
+                "-i", input_path,
+                "-c:v", "h264_nvenc",
+                "-preset", "p1",
+                "-tune", "hq",
+                "-rc", "vbr",
+                "-cq", "23",
+                "-b:v", "0",
+                "-maxrate", "130M",
+                "-bufsize", "130M",
+                "-spatial-aq", "1",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-y",
+                output_path
+            ]
 
         try:
-            # Handle video to audio conversion
-            if input_extension in video_formats and output_format in audio_formats:
-                ffmpeg_cmd = ["ffmpeg", "-i", input_path, "-vn"]
+            print("Attempting GPU conversion:", " ".join(gpu_cmd))
+            subprocess.run(gpu_cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            return
+        except subprocess.CalledProcessError:
+            print("GPU conversion failed, falling back to CPU encoding")
 
-                # Format-specific settings
-                if output_format == "mp3":
-                    ffmpeg_cmd.extend([
-                        "-acodec", "libmp3lame",
-                        "-q:a", "2",
-                        "-b:a", "192k"
-                    ])
-                elif output_format == "ogg":
-                    ffmpeg_cmd.extend([
-                        "-acodec", "libvorbis",
-                        "-q:a", "6",
-                        "-b:a", "192k"
-                    ])
-                elif output_format == "wav":
-                    ffmpeg_cmd.extend([
-                        "-acodec", "pcm_s16le",
-                        "-ar", "44100"
-                    ])
-                elif output_format == "flac":
-                    ffmpeg_cmd.extend([
-                        "-acodec", "flac",
-                        "-compression_level", "8"
-                    ])
+        # Fallback CPU encoding settings
+        if output_format.lower() == "avi":
+            cpu_cmd = [
+                ffmpeg_path,
+                "-i", input_path,
+                "-c:v", "mpeg4",
+                "-q:v", "5",
+                "-c:a", "mp3",
+                "-y",
+                output_path
+            ]
+        else:  # mp4 and other formats
+            cpu_cmd = [
+                ffmpeg_path,
+                "-i", input_path,
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-y",
+                output_path
+            ]
 
-                ffmpeg_cmd.extend(["-y", output_path])
-                print("Running command:", " ".join(ffmpeg_cmd))
-                subprocess.run(ffmpeg_cmd, check=True)
+        print("Using CPU fallback:", " ".join(cpu_cmd))
+        subprocess.run(cpu_cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
-            # Handle video to video conversion
-            elif input_extension in video_formats and output_format in video_formats:
-                if use_gpu:
-                    def monitor_progress():
-                        output_size = 0
-                        while True:
-                            if os.path.exists(output_path):
-                                new_size = os.path.getsize(output_path)
-                                if new_size != output_size:
-                                    output_size = new_size
-                                    safe_update_ui(lambda: convert_button.config(
-                                        text=f"Converting {idx}/{total_files} ({output_size / 1024 / 1024:.1f} MB)",
-                                        fg="white"
-                                    ))
-                            time.sleep(0.5)
+    except FileNotFoundError as e:
+        print(f"FFmpeg error (FileNotFoundError): {e}")
+        raise
+    except subprocess.CalledProcessError as e:
+        print(f"FFmpeg conversion failed: {e}")
+        raise
+    except Exception as e:
+        print(f"Unexpected error during video conversion: {e}")
+        raise
 
-                    monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
-                    monitor_thread.start()
-                    direct_ffmpeg_gpu_video2video(input_path, output_path)
-                else:
-                    video_clip = VideoFileClip(input_path)
-                    video_clip.write_videofile(
-                        output_path,
-                        codec='libx264',
-                        fps=video_clip.fps or 30,
-                        logger=None
+
+def initialize_ffmpeg_paths():
+    """
+    Initialize FFmpeg paths for both direct FFmpeg calls and pydub.
+    Returns tuple of (ffmpeg_path, ffprobe_path).
+    """
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        # Determine ffprobe path based on ffmpeg path
+        if getattr(sys, 'frozen', False):
+            ffprobe_path = os.path.join(
+                os.path.dirname(ffmpeg_path),
+                'ffprobe.exe'
+            )
+        else:
+            # In development, if ffmpeg is in PATH, ffprobe should be too
+            if sys.platform == 'win32':
+                from shutil import which
+                ffprobe_path = which('ffprobe.exe')
+                if not ffprobe_path:
+                    raise FileNotFoundError("FFprobe not found in PATH")
+            else:
+                ffprobe_path = "ffprobe"
+
+        # Verify both executables exist
+        if not os.path.exists(ffmpeg_path):
+            raise FileNotFoundError(f"FFmpeg not found at: {ffmpeg_path}")
+        if sys.platform == 'win32' and not os.path.exists(ffprobe_path):
+            raise FileNotFoundError(f"FFprobe not found at: {ffprobe_path}")
+
+        # Set up pydub paths
+        AudioSegment.converter = ffmpeg_path
+        AudioSegment.ffmpeg = ffmpeg_path
+        AudioSegment.ffprobe = ffprobe_path
+
+        print(f"Successfully initialized FFmpeg at: {ffmpeg_path}")
+        print(f"Successfully initialized FFprobe at: {ffprobe_path}")
+
+        return ffmpeg_path, ffprobe_path
+
+    except Exception as e:
+        print(f"Error initializing FFmpeg: {str(e)}")
+        raise
+
+
+def convert_audio(input_paths: list, output_folder: str, output_format: str,
+                  progress_var: tk.IntVar, convert_button: tk.Button, use_gpu: bool) -> None:
+    """
+    Convert audio/video files to the specified format with comprehensive error handling
+    and progress tracking.
+
+    Args:
+        input_paths (list): List of paths to input files
+        output_folder (str): Destination folder for converted files
+        output_format (str): Target format for conversion
+        progress_var (tk.IntVar): Progress bar variable
+        convert_button (tk.Button): Convert button widget for UI updates
+        use_gpu (bool): Whether to use GPU acceleration when available
+    """
+    try:
+        ffmpeg_path, ffprobe_path = initialize_ffmpeg_paths()
+        print(f"Using FFmpeg from: {ffmpeg_path}")
+        print(f"Using FFprobe from: {ffprobe_path}")
+
+        os.makedirs(output_folder, exist_ok=True)
+
+        from pydub.utils import mediainfo
+        AudioSegment.converter = ffmpeg_path
+        AudioSegment.ffmpeg = ffmpeg_path
+        AudioSegment.ffprobe = ffprobe_path
+
+        audio_formats = ["wav", "ogg", "flac", "mp3"]
+        video_formats = ["mp4", "avi", "mov"]
+
+        def update_button(text: str, bg: str = "#D8BFD8") -> None:
+            safe_update_ui(lambda: convert_button.config(text=text, bg=bg, fg="white"))
+
+        def update_status(text: str) -> None:
+            safe_update_ui(lambda: youtube_status_label.config(text=text))
+
+        update_button("Converting...")
+        total_files = len(input_paths)
+
+        for idx, input_path in enumerate(input_paths, start=1):
+            try:
+                input_path = os.path.normpath(input_path).replace('"', '')
+                file_name = os.path.basename(input_path)
+                file_base, file_ext = os.path.splitext(file_name)
+                input_extension = file_ext[1:].lower()
+                output_file_name = f'{file_base}.{output_format}'
+                output_path = os.path.normpath(os.path.join(output_folder, output_file_name))
+
+                update_status(f"Converting file {idx}/{total_files}: {file_name}")
+
+                if output_format not in audio_formats + video_formats:
+                    raise ValueError(f"Unsupported output format: {output_format}")
+
+                if input_extension in audio_formats and output_format in video_formats:
+                    update_button("Convert", "#9370DB")
+                    if not punish_user_with_maths():
+                        return
+                    update_button("Convert", "#9370DB")
+                    return
+
+                if input_extension in video_formats and output_format in audio_formats:
+                    # Simple direct probe for audio streams
+                    probe_cmd = [
+                        ffmpeg_path,
+                        "-i", input_path,
+                        "-hide_banner"
+                    ]
+
+                    probe_result = subprocess.run(
+                        probe_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False
                     )
-                    video_clip.close()
 
-            # Handle audio to audio conversion
-            elif input_extension in audio_formats and output_format in audio_formats:
-                audio = AudioSegment.from_file(input_path)
-                audio.export(output_path, format=output_format)
+                    # Check for audio stream in FFmpeg's stderr output
+                    has_audio = "Stream #0" in probe_result.stderr and "Audio:" in probe_result.stderr
 
-            progress_var.set(int((idx / total_files) * 100))
-            if not use_gpu or input_extension not in video_formats:
+                    if not has_audio:
+                        error_msg = (
+                            f"Cannot convert '{file_name}' to {output_format} format.\n\n"
+                            f"The selected video file does not contain any audio tracks. "
+                            f"Please ensure the video has audio before attempting to convert to an audio format."
+                        )
+                        print(f"Conversion warning: No audio streams found in {file_name}")
+                        safe_update_ui(lambda: messagebox.showwarning(
+                            "No Audio Found",
+                            error_msg,
+                            parent=app
+                        ))
+                        return
+
+                    ffmpeg_cmd = [
+                        ffmpeg_path,
+                        "-i", input_path,
+                        "-vn",
+                        "-y"
+                    ]
+
+                    if output_format == "mp3":
+                        ffmpeg_cmd.extend(["-acodec", "libmp3lame", "-q:a", "2", "-b:a", "192k"])
+                    elif output_format == "ogg":
+                        ffmpeg_cmd.extend(["-acodec", "libvorbis", "-q:a", "6"])
+                    elif output_format == "flac":
+                        ffmpeg_cmd.extend(["-acodec", "flac"])
+                    elif output_format == "wav":
+                        ffmpeg_cmd.extend(["-acodec", "pcm_s16le"])
+
+                    ffmpeg_cmd.append(output_path)
+
+                elif input_extension in video_formats and output_format in video_formats:
+                    direct_ffmpeg_gpu_video2video(input_path, output_path, output_format)
+                    continue
+
+                elif input_extension in audio_formats and output_format in audio_formats:
+                    ffmpeg_cmd = [
+                        ffmpeg_path,
+                        "-i", input_path,
+                        "-y"
+                    ]
+
+                    if output_format == "mp3":
+                        ffmpeg_cmd.extend(["-acodec", "libmp3lame", "-q:a", "2", "-b:a", "192k"])
+                    elif output_format == "ogg":
+                        ffmpeg_cmd.extend(["-acodec", "libvorbis", "-q:a", "6"])
+                    elif output_format == "flac":
+                        ffmpeg_cmd.extend(["-acodec", "flac"])
+                    elif output_format == "wav":
+                        ffmpeg_cmd.extend(["-acodec", "pcm_s16le"])
+
+                    ffmpeg_cmd.append(output_path)
+
+                print(f"Executing FFmpeg command: {' '.join(ffmpeg_cmd)}")
+
+                try:
+                    result = subprocess.run(
+                        ffmpeg_cmd,
+                        check=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        capture_output=True,
+                        text=True,
+                        shell=False
+                    )
+                except subprocess.CalledProcessError as e:
+                    print(f"FFmpeg stderr output: {e.stderr}")
+                    raise
+
+                progress_var.set(int((idx / total_files) * 100))
                 update_button(f"Converting: {progress_var.get()}%")
+                print(f"Successfully converted: {file_name} -> {output_file_name}")
 
-            print(f"Processed: {file_name} -> {output_file_name}")
+            except subprocess.CalledProcessError as e:
+                error_msg = f"FFmpeg failed to convert {file_name}: {str(e)}"
+                print(f"FFmpeg error: {error_msg}")
+                safe_update_ui(lambda: messagebox.showerror("Error", error_msg, parent=app))
+                return
+            except Exception as e:
+                error_msg = f"Error converting {file_name}: {str(e)}"
+                print(f"Conversion error: {error_msg}")
+                safe_update_ui(lambda: messagebox.showerror("Error", error_msg, parent=app))
+                return
 
-        except subprocess.CalledProcessError as e:
-            safe_update_ui(lambda: messagebox.showerror(
-                "Conversion Error",
-                f"FFmpeg failed to convert {file_name}: {e}",
-                parent=app
-            ))
-        except Exception as e:
-            safe_update_ui(lambda: messagebox.showerror(
-                "Error",
-                f"Error converting {file_name}: {e}",
-                parent=app
-            ))
+        def show_completion_dialog():
+            convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
+            youtube_status_label.config(text="Conversion Complete!")
 
-    def show_completion_dialog():
-        convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
-        youtube_status_label.config(text="Conversion Complete!")
+            if messagebox.askyesno(
+                    "Success!",
+                    "Conversion complete! Would you like to open the output folder?",
+                    parent=app
+            ):
+                os.startfile(output_folder)
 
-        if messagebox.askyesno(
-                "Success!",
-                "Conversion complete! Do you want to open the output folder?",
-                parent=app
-        ):
-            os.startfile(output_folder)
+            convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
+            app.update_idletasks()
 
-        convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
-        app.update_idletasks()
+        safe_update_ui(show_completion_dialog)
 
-    safe_update_ui(show_completion_dialog)
+    except Exception as e:
+        error_msg = f"Conversion failed: {str(e)}"
+        print(f"Fatal error: {error_msg}")
+        traceback.print_exc()
+        safe_update_ui(lambda: messagebox.showerror("Error", error_msg, parent=app))
+
+
 
 def punish_user_with_maths() -> bool:
     """Present the user with math problems as a consequence of invalid operations."""
@@ -534,45 +753,68 @@ def get_format_string(quality, format_type):
 
 def modify_download_options(ydl_opts, quality, format_type):
     """Modify yt-dlp options based on quality and format selections."""
-    audio_formats = ["mp3", "wav", "flac", "ogg"]
+    try:
+        # Get FFmpeg path using our existing function
+        ffmpeg_path = get_ffmpeg_path()
+        ffprobe_path = ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')
 
-    if format_type in audio_formats:
+        # Essential base configuration
         ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': format_type,
-                'preferredquality': '192'
-            }],
-            'extractaudio': True,
-            'addmetadata': True
+            'ffmpeg_location': ffmpeg_path,
+            'prefer_ffmpeg': True,
+            'external_downloader_args': {'ffmpeg_i': ['-threads', '4']},
         })
 
-        # Remove the 'acodec' parameter as it's not needed
-        if format_type == 'wav':
-            ydl_opts['postprocessors'][0]['preferredquality'] = '192K'
-        elif format_type == 'flac':
-            ydl_opts['postprocessors'][0]['preferredquality'] = '192K'
-        elif format_type == 'ogg':
-            ydl_opts['postprocessors'][0]['preferredquality'] = '192K'
+        audio_formats = ["mp3", "wav", "flac", "ogg"]
 
-        # Ensure correct extension in output filename
-        if 'outtmpl' not in ydl_opts:
-            ydl_opts['outtmpl'] = '%(title)s.%(ext)s'
+        if format_type in audio_formats:
+            ydl_opts.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': format_type,
+                    'preferredquality': '192'
+                }]
+            })
+        else:
+            format_string = get_format_string(quality, format_type)
+            ydl_opts.update({
+                'format': format_string,
+                'merge_output_format': format_type,
+                'postprocessors': [{
+                    'key': 'FFmpegVideoRemuxer',
+                    'preferedformat': format_type
+                }]
+            })
 
-        # Remove any video-specific options
-        ydl_opts.pop('merge_output_format', None)
+            # Post-processor arguments for video formats
+            if format_type == 'mp4':
+                ydl_opts['postprocessor_args'] = {
+                    'FFmpegVideoRemuxer': [
+                        '-c:v', 'libx264',
+                        '-c:a', 'aac',
+                        '-b:a', '192k'
+                    ]
+                }
+            elif format_type == 'avi':
+                ydl_opts['postprocessor_args'] = {
+                    'FFmpegVideoRemuxer': [
+                        '-c:v', 'mpeg4',
+                        '-c:a', 'mp3',
+                        '-q:v', '6'
+                    ]
+                }
 
-    else:
-        # Handle video formats
-        ydl_opts['format'] = get_format_string(quality, format_type)
-        ydl_opts['merge_output_format'] = format_type.lower()
-        ydl_opts['postprocessors'] = [
-            {'key': 'FFmpegMerger'},
-            {'key': 'FFmpegMetadata'}
-        ]
+        print(f"Using FFmpeg from: {ffmpeg_path}")
+        print(f"Download options configured: {ydl_opts}")
 
-    return ydl_opts
+        return ydl_opts
+
+    except Exception as e:
+        print(f"Error configuring download options: {str(e)}")
+        raise
+
+
 
 
 def yt_dlp_progress_hook(d: dict) -> None:
@@ -650,37 +892,51 @@ def download_video() -> None:
 
     # Check if URL is a playlist
     if 'list=' in input_url:
-        if 'watch?v=' in input_url:
-            response = messagebox.askyesnocancel(
-                "Playlist Detected",
-                "This link is part of a playlist. Would you like to download the entire playlist or just this video?\n\n"
-                "Yes - Download entire playlist\n"
-                "No - Download only this video\n"
-                "Cancel - Do nothing"
-            )
-            if response is None:
-                return  # User selected cancel, exit function
-            elif response:
-                download_url = input_url  # Download entire playlist
-            else:
-                download_url = input_url.split('&list=')[0]  # Download only the video
-        else:
-            if not messagebox.askyesno("Playlist Detected", "This is a playlist link. Would you like to download the entire playlist?"):
-                return  # User selected no, exit function
-            download_url = input_url  # Download entire playlist
+        # First get playlist info
+        try:
+            with yt_dlp.YoutubeDL() as ydl:
+                playlist_info = ydl.extract_info(input_url, download=False)
+                video_count = len(playlist_info['entries']) if 'entries' in playlist_info else 0
+
+                if 'watch?v=' in input_url:
+                    response = messagebox.askyesnocancel(
+                        "Playlist Detected",
+                        f"This link is part of a playlist with {video_count} videos.\n\nWould you like to download the entire playlist or just this video?\n\n"
+                        "Yes - Download entire playlist\n"
+                        "No - Download only this video\n"
+                        "Cancel - Do nothing"
+                    )
+                    if response is None:
+                        return  # User selected cancel
+                    elif response:
+                        download_url = input_url  # Download entire playlist
+                    else:
+                        download_url = input_url.split('&list=')[0]  # Download only the video
+                else:
+                    if not messagebox.askyesno("Playlist Detected",
+                                               f"This is a playlist link containing {video_count} videos. Would you like to download the entire playlist?"):
+                        return
+                    download_url = input_url
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to get playlist information: {str(e)}")
+            return
     else:
         download_url = input_url
 
     def download_thread():
         try:
+            ffmpeg_path = get_ffmpeg_path()
+            os.environ['PATH'] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ['PATH']
+
             ydl_opts = {
                 'paths': {'home': output_folder, 'temp': output_folder},
                 'outtmpl': '%(title)s.%(ext)s',
                 'progress_hooks': [yt_dlp_progress_hook],
                 'ignoreerrors': True,
-                'geo_bypass': True,
-                'geo_bypass_country': 'US',
                 'overwrites': True,
+                'max_sleep_interval': 1,  # Reduce waiting time between requests
+                'min_sleep_interval': 1,  # Minimize waiting
+                'extractor_retries': 5,  # Reduce retries for faster performance
             }
 
             ydl_opts = modify_download_options(ydl_opts, quality, format_type)
@@ -721,10 +977,30 @@ def download_video() -> None:
 # =================================
 def setup_fonts() -> tuple:
     """Initialize and return the application fonts."""
-    return (
-        tkFont.Font(family="Bubblegum Sans", size=32),  # title_font
-        tkFont.Font(family="Bartino Regular", size=14)  # regular_font
-    )
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        # Load fonts using Windows API
+        FONT_ADDED = 0x10
+        bubblegum_path = resource_path(os.path.join('assets', 'fonts', 'BubblegumSans-Regular.ttf'))
+        bartino_path = resource_path(os.path.join('assets', 'fonts', 'Bartino.ttf'))
+
+        # Add fonts to Windows
+        ctypes.windll.gdi32.AddFontResourceW(bubblegum_path)
+        ctypes.windll.gdi32.AddFontResourceW(bartino_path)
+
+        # Create font objects with the actual font family names
+        title_font = tkFont.Font(family="Bubblegum Sans", size=32)
+        regular_font = tkFont.Font(family="Bartino", size=14)
+
+        return (title_font, regular_font)
+    except Exception as e:
+        print(f"Font loading error: {e}")
+        return (
+            tkFont.Font(family="Arial", size=32, weight="bold"),
+            tkFont.Font(family="Arial", size=14)
+        )
 
 
 def setup_main_window() -> None:
@@ -734,13 +1010,13 @@ def setup_main_window() -> None:
         os.environ["TCLLIBPATH"] = tcl_dnd_path
         print("Set TCLLIBPATH to", tcl_dnd_path)
 
-    icon_path = resource_path(os.path.join('../assets', 'icons', 'icon.png'))
+    icon_path = resource_path(os.path.join('assets', 'icons', 'icon.png'))
     icon_img = PhotoImage(file=icon_path)
     app.iconphoto(False, icon_img)
     app.title(f"Hey besties let's convert those files (v{CURRENT_VERSION})")
     app.configure(bg="#E6E6FA")
     app.geometry("700x550")  # Increased height to accommodate new options
-    app.minsize(900, 800)
+    app.minsize(900, 875)
     app.resizable(True, True)
 
     app.call('wm', 'iconphoto', app._w, '-default', icon_img)
@@ -903,15 +1179,28 @@ def create_ui_components() -> None:
 # Application Entry Point
 # =================================
 if __name__ == "__main__":
-    # Initialize main window
-    app = TkinterDnD.Tk()
+    try:
+        # Initialize main window
+        app = TkinterDnD.Tk()
 
-    # Initialize variables
-    format_var = tk.StringVar()
-    gpu_var = tk.BooleanVar(value=True)
-    progress_var = tk.IntVar()
+        # Initialize variables
+        format_var = tk.StringVar()
+        gpu_var = tk.BooleanVar(value=True)
+        progress_var = tk.IntVar()
 
-    setup_main_window()
-    create_ui_components()
+        # Verify FFmpeg availability early
+        try:
+            ffmpeg_path, ffprobe_path = initialize_ffmpeg_paths()
+            print(f"Successfully initialized FFmpeg at: {ffmpeg_path}")
+            print(f"Successfully initialized FFprobe at: {ffprobe_path}")
+        except FileNotFoundError as e:
+            messagebox.showerror("FFmpeg Error", str(e))
+            sys.exit(1)
 
-    app.mainloop()
+        setup_main_window()
+        create_ui_components()
+
+        app.mainloop()
+    except Exception:
+        log_errors()
+        messagebox.showerror("Error", "Something went wrong. Check error_log.txt")
