@@ -1,8 +1,4 @@
-﻿# =================================
-# Imports and Constants
-# =================================
-
-# Standard library imports
+﻿# Standard library imports
 import os
 import re
 import sys
@@ -19,7 +15,6 @@ import packaging.version as version
 import yt_dlp
 import pydub
 from pydub import AudioSegment
-from moviepy.editor import VideoFileClip
 
 # Tkinter imports
 import tkinter as tk
@@ -31,7 +26,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import traceback
 
 # Application Constants
-CURRENT_VERSION = "1.3.8"
+CURRENT_VERSION = "1.4.1"
 ITCH_GAME_URL = "https://laceediting.itch.io/laces-total-file-converter"
 ITCH_API_KEY = "TLSrZ5K4iHauDMTTqS9xfpBAx1Tsc6NPgTFrvcgj"
 ITCH_GAME_ID = "3268562"
@@ -39,7 +34,6 @@ ITCH_GAME_ID = "3268562"
 #=================================
 # Globals
 #=================================
-# Initialize global variables for UI components
 input_entry = None
 output_folder_entry = None
 youtube_link_entry = None
@@ -61,7 +55,6 @@ def log_errors():
     with open("error_log.txt", "w") as f:
         f.write(traceback.format_exc())
 
-# Add error handling and logging
 def get_ffmpeg_path():
     """
     Get the correct path to the FFmpeg executable, handling both development
@@ -124,23 +117,22 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.dirname(__file__), relative_path)
 
-def is_valid_url(url: str) -> bool:
+def is_valid_url(input_url):
     """Validate if a given URL is from a supported platform."""
+    supported_domains = [
+        'youtube.com', 'youtu.be',
+        'music.youtube.com',
+        'twitter.com', 'x.com',
+        'tiktok.com',
+        'dailymotion.com', 'dai.ly',
+        'vimeo.com',
+        'instagram.com/reels', 'instagram.com/reel'
+    ]
     try:
-        parsed_url = urlparse(url)
-        supported_domains = [
-            'youtube.com', 'youtu.be',
-            'twitter.com', 'x.com',
-            'tiktok.com',
-            'dailymotion.com', 'dai.ly',
-            'vimeo.com'
-        ]
-        return bool(
-            parsed_url.scheme and
-            parsed_url.netloc and
-            any(domain in parsed_url.netloc for domain in supported_domains)
-        )
-    except:
+        parsed_url = urlparse(input_url)
+        cleaned_path = parsed_url.path.split('?')[0]  # Remove query parameters
+        return any(domain in parsed_url.netloc + cleaned_path for domain in supported_domains)
+    except Exception as e:
         return False
 
 def initialize_pydub():
@@ -166,7 +158,7 @@ def handle_auto_update(latest_version: str) -> None:
 def check_for_updates(app) -> bool:
     """Check for updates using itch.io's API."""
     try:
-        safe_update_ui(lambda: youtube_status_label.config(text="Checking for updates..."))
+        safe_update_ui(lambda: youtube_status_label.config(text="Hmmm..."))
 
         api_url = f"https://itch.io/api/1/{ITCH_API_KEY}/game/{ITCH_GAME_ID}/uploads"
         response = requests.get(api_url, headers={"Content-Type": "application/json"}, timeout=5)
@@ -204,7 +196,7 @@ Go to latest version's download page?
                         handle_auto_update(latest_version)
                     return True
 
-            safe_update_ui(lambda: youtube_status_label.config(text="You're running the latest version!"))
+            safe_update_ui(lambda: youtube_status_label.config(text="You're running the latest version! Good job!"))
         return False
 
     except requests.RequestException as e:
@@ -216,12 +208,12 @@ Go to latest version's download page?
         return False
     finally:
         app.after(3000, lambda: safe_update_ui(
-            lambda: youtube_status_label.config(text="YouTube Status: Idle")
+            lambda: youtube_status_label.config(text="Download Status: Idle")
         ))
 
 
 def setup_auto_update_checker(app) -> None:
-    """Set up automatic update checking."""
+    # Setup automatic update checking
     app.after(1000, lambda: check_for_updates(app))
 
     def schedule_next_check():
@@ -231,7 +223,7 @@ def setup_auto_update_checker(app) -> None:
     app.after(86400000, schedule_next_check)
 
 def show_about() -> None:
-    """Show the About dialog."""
+    # Show the about dialog
     messagebox.showinfo(
         "About",
         f"Lace's Total File Converter v{CURRENT_VERSION}\n\n"
@@ -240,7 +232,7 @@ def show_about() -> None:
     )
 
 def add_update_menu(app, menubar) -> None:
-    """Add the update menu to the menubar."""
+    # Add the update menu to the menubar
     help_menu = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="Help", menu=help_menu)
     help_menu.add_command(label="Check for Updates", command=lambda: check_for_updates(app))
@@ -253,7 +245,7 @@ def add_update_menu(app, menubar) -> None:
 # Core Application Logic
 #=================================
 def direct_ffmpeg_gpu_video2video(input_path: str, output_path: str, output_format: str) -> None:
-    """Execute FFmpeg command for video conversion with fallback to CPU if GPU fails."""
+    # execute ffmpeg command to convert video to video
     try:
         ffmpeg_path = get_ffmpeg_path()
         print(f"Using FFmpeg from: {ffmpeg_path}")
@@ -548,11 +540,11 @@ def convert_audio(input_paths: list, output_folder: str, output_format: str,
 
         def show_completion_dialog():
             convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
-            youtube_status_label.config(text="Conversion Complete!")
+            youtube_status_label.config(text="Conversion Complete! ^.^")
 
             if messagebox.askyesno(
                     "Success!",
-                    "Conversion complete! Would you like to open the output folder?",
+                    "Conversion complete! Do you wanna open the output folder?",
                     parent=app
             ):
                 os.startfile(output_folder)
@@ -571,7 +563,7 @@ def convert_audio(input_paths: list, output_folder: str, output_format: str,
 
 
 def punish_user_with_maths() -> bool:
-    """Present the user with math problems as a consequence of invalid operations."""
+    # Funny math problems if the user does a bad action such as trying to convert an audio file to a video file
     result = [False]
 
     def show_math_dialog():
@@ -641,7 +633,6 @@ def punish_user_with_maths() -> bool:
 # UI Event Handlers
 #=================================
 def on_drop(event) -> None:
-    """Handle drag and drop file events."""
     try:
         files = app.tk.splitlist(event.data)
         input_entry.delete(0, tk.END)
@@ -654,7 +645,6 @@ def on_drop(event) -> None:
         )
 
 def select_input() -> None:
-    """Handle input file selection."""
     input_selected = filedialog.askopenfilenames(
         filetypes=[("Media files", "*.mp3;*.wav;*.ogg;*.flac;*.mp4;*.avi;*.mov")]
     )
@@ -663,17 +653,15 @@ def select_input() -> None:
         input_entry.insert(0, ";".join(input_selected))
 
 def select_output_folder() -> None:
-    """Handle output folder selection."""
     folder_selected = filedialog.askdirectory()
     output_folder_entry.delete(0, tk.END)
     output_folder_entry.insert(0, folder_selected)
 
 
 def start_conversion() -> None:
-    """Start the conversion process."""
     input_paths = input_entry.get().strip().split(";")
     output_folder = output_folder_entry.get().strip()
-    output_format = format_dropdown.get()  # Get format directly from dropdown
+    output_format = format_dropdown.get()
 
     # Input validation
     if not input_paths or not input_paths[0]:
@@ -714,7 +702,6 @@ def start_conversion() -> None:
     thread.start()
 
 def toggle_interface(enabled: bool = True) -> None:
-    """Enable or disable all UI elements."""
     widgets = [
         input_entry, output_folder_entry, youtube_link_entry,
         format_dropdown, convert_button, gpu_checkbox
@@ -765,17 +752,37 @@ def modify_download_options(ydl_opts, quality, format_type):
             'external_downloader_args': {'ffmpeg_i': ['-threads', '4']},
         })
 
+        # Check if it's a YouTube Music URL
+        is_youtube_music = 'music.youtube.com' in ydl_opts.get('webpage_url', '')
+
         audio_formats = ["mp3", "wav", "flac", "ogg"]
 
-        if format_type in audio_formats:
+        if format_type in audio_formats or is_youtube_music:
+            # For YouTube Music, always use high-quality audio extraction
             ydl_opts.update({
                 'format': 'bestaudio/best',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
-                    'preferredcodec': format_type,
-                    'preferredquality': '192'
+                    'preferredcodec': format_type if format_type in audio_formats else 'mp3',
+                    'preferredquality': '192',
+                    'nopostoverwrites': False
                 }]
             })
+
+            # Add metadata extraction for YouTube Music
+            if is_youtube_music:
+                ydl_opts['postprocessors'].append({
+                    'key': 'FFmpegMetadata',
+                    'add_metadata': True,
+                })
+
+                # Add thumbnail embedding if it's an MP3
+                if format_type == 'mp3':
+                    ydl_opts['postprocessors'].append({
+                        'key': 'EmbedThumbnail',
+                        'already_have_thumbnail': False,
+                    })
+                    ydl_opts['writethumbnail'] = True
         else:
             format_string = get_format_string(quality, format_type)
             ydl_opts.update({
@@ -840,41 +847,25 @@ def yt_dlp_progress_hook(d: dict) -> None:
             convert_button.config(text=button_text, fg="white")
 
         elif d['status'] == 'finished':
-            youtube_status_label.config(text="Processing download...")
+            youtube_status_label.config(text="Big brain flex...")
         elif d['status'] == 'error':
-            youtube_status_label.config(text="Download error!")
+            youtube_status_label.config(text="AAAAAH!")
             convert_button.config(text="CONVERT", fg="white")
 
     safe_update_ui(update)
 
 
-def download_video() -> None:
+def download_video():
     """Handle video downloads from various platforms."""
     global youtube_format_var, youtube_quality_var
 
     input_url = youtube_link_entry.get().strip()
     if not input_url:
-        messagebox.showerror("Error", "Please provide a video URL.")
+        messagebox.showerror("Lunatic Alert", "This is clearly not a valid video URL lol")
         return
 
-    def is_valid_url(input_url):
-        supported_domains = [
-            'youtube.com', 'youtu.be',
-            'twitter.com', 'x.com',
-            'tiktok.com',
-            'dailymotion.com', 'dai.ly',
-            'vimeo.com',
-            'instagram.com/reels', 'instagram.com/reel'
-        ]
-        try:
-            parsed_url = urlparse(input_url)
-            cleaned_path = parsed_url.path.split('?')[0]  # Remove query parameters
-            return any(domain in parsed_url.netloc + cleaned_path for domain in supported_domains)
-        except Exception as e:
-            return False
-
     if not is_valid_url(input_url):
-        supported_platforms = ['YouTube', 'Twitter', 'TikTok', 'Dailymotion', 'Vimeo', 'Instagram Reels']
+        supported_platforms = ['YouTube', 'YouTube Music', 'Twitter', 'TikTok', 'Dailymotion', 'Vimeo', 'Instagram Reels']
         messagebox.showerror("Error", f"Please provide a valid video URL from a supported platform: {', '.join(supported_platforms)}.")
         return
 
@@ -886,12 +877,29 @@ def download_video() -> None:
     try:
         format_type = youtube_format_var.get()
         quality = youtube_quality_var.get()
+
+        # For YouTube Music, default to MP3 if a video format is selected
+        if 'music.youtube.com' in input_url and format_type not in ['mp3', 'wav', 'flac', 'ogg']:
+            safe_update_ui(lambda: youtube_status_label.config(
+                text="Extracting Playlist Data - This may take a while..."
+            ))
+            format_type = 'mp3'
+            youtube_format_var.set('mp3')
+            messagebox.showinfo("Format Changed",
+                              'YouTube Music detected - defaulting to mp3. This may take a while, the program is not crashing even if it says "not responding" lol')
+
     except Exception as e:
         messagebox.showerror("Error", "Failed to get format or quality settings. Please try again.")
         return
 
     # Check if URL is a playlist
     if 'list=' in input_url:
+        # Update status for playlist extraction
+        safe_update_ui(lambda: youtube_status_label.config(
+            text="Extracting Playlist Data - This may take a while..."
+        ))
+        app.update_idletasks()
+
         # First get playlist info
         try:
             with yt_dlp.YoutubeDL() as ydl:
@@ -900,24 +908,27 @@ def download_video() -> None:
 
                 if 'watch?v=' in input_url:
                     response = messagebox.askyesnocancel(
-                        "Playlist Detected",
-                        f"This link is part of a playlist with {video_count} videos.\n\nWould you like to download the entire playlist or just this video?\n\n"
+                        "Uh oh video within a playlist alert",
+                        f"So this video is part of a playlist of {video_count} videos.\n\nDo you wanna download the entire playlist or just this video?\n\n"
                         "Yes - Download entire playlist\n"
                         "No - Download only this video\n"
-                        "Cancel - Do nothing"
+                        "Cancel - Run away"
                     )
                     if response is None:
+                        safe_update_ui(lambda: youtube_status_label.config(text="Download Status: Idle"))
                         return  # User selected cancel
                     elif response:
                         download_url = input_url  # Download entire playlist
                     else:
                         download_url = input_url.split('&list=')[0]  # Download only the video
                 else:
-                    if not messagebox.askyesno("Playlist Detected",
-                                               f"This is a playlist link containing {video_count} videos. Would you like to download the entire playlist?"):
+                    if not messagebox.askyesno("uh oh playlist alert lol",
+                                             f"Hey this is a playlist link containing {video_count} videos. Do you wanna download the entire playlist?"):
+                        safe_update_ui(lambda: youtube_status_label.config(text="Download Status: Idle"))
                         return
                     download_url = input_url
         except Exception as e:
+            safe_update_ui(lambda: youtube_status_label.config(text="Download Status: Idle"))
             messagebox.showerror("Error", f"Failed to get playlist information: {str(e)}")
             return
     else:
@@ -934,9 +945,10 @@ def download_video() -> None:
                 'progress_hooks': [yt_dlp_progress_hook],
                 'ignoreerrors': True,
                 'overwrites': True,
-                'max_sleep_interval': 1,  # Reduce waiting time between requests
-                'min_sleep_interval': 1,  # Minimize waiting
-                'extractor_retries': 5,  # Reduce retries for faster performance
+                'max_sleep_interval': 1,
+                'min_sleep_interval': 1,
+                'extractor_retries': 5,
+                'webpage_url': input_url  # Add the original URL for format detection
             }
 
             ydl_opts = modify_download_options(ydl_opts, quality, format_type)
@@ -944,8 +956,8 @@ def download_video() -> None:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([download_url])
 
-            safe_update_ui(lambda: youtube_status_label.config(text="Download Complete!"))
-            if messagebox.askyesno("Success!", "Would you like to open the output folder?"):
+            safe_update_ui(lambda: youtube_status_label.config(text="Download Complete! ^.^"))
+            if messagebox.askyesno("Success!", "Do you wanna open the output folder?"):
                 os.startfile(output_folder)
 
         except yt_dlp.utils.DownloadError as download_error:
@@ -965,7 +977,8 @@ def download_video() -> None:
             safe_update_ui(lambda: convert_button.config(text="CONVERT", fg="white"))
 
     toggle_interface(False)
-    youtube_status_label.config(text="Processing URL...")
+    if 'list=' not in input_url:  # Only show "Processing URL" for non-playlist downloads
+        youtube_status_label.config(text="Processing URL...")
     app.update_idletasks()
 
     thread = threading.Thread(target=download_thread, daemon=True)
@@ -976,7 +989,6 @@ def download_video() -> None:
 # Main Application Setup
 # =================================
 def setup_fonts() -> tuple:
-    """Initialize and return the application fonts."""
     try:
         import ctypes
         import ctypes.wintypes
@@ -1004,7 +1016,6 @@ def setup_fonts() -> tuple:
 
 
 def setup_main_window() -> None:
-    """Initialize the main application window."""
     if hasattr(sys, "_MEIPASS"):
         tcl_dnd_path = os.path.join(sys._MEIPASS, "tkinterdnd2", "tkdnd", "win-x64")
         os.environ["TCLLIBPATH"] = tcl_dnd_path
@@ -1025,7 +1036,6 @@ def setup_main_window() -> None:
 
 
 def create_ui_components() -> None:
-    """Create and layout all UI components."""
     title_font, regular_font = setup_fonts()
 
     # Create menu bar
@@ -1166,7 +1176,7 @@ def create_ui_components() -> None:
     )
     gpu_checkbox.grid(row=0, column=0, pady=5, sticky="ew")
 
-    youtube_status_label = tk.Label(bottom_frame, text="Status: Idle",
+    youtube_status_label = tk.Label(bottom_frame, text="Download Status: Idle",
                                     bg="#E6E6FA", font=regular_font)
     youtube_status_label.grid(row=1, column=0, pady=5, sticky="ew")
 
