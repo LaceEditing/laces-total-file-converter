@@ -22,7 +22,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import traceback
 import logging
 
-# Optional: Set up logging (adjust level as needed)
+# Sets up loging for debug purposes or scary random crashes
 logging.basicConfig(level=logging.INFO)
 
 # Application Constants
@@ -32,7 +32,7 @@ ITCH_API_KEY = "TLSrZ5K4iHauDMTTqS9xfpBAx1Tsc6NPgTFrvcgj"
 ITCH_GAME_ID = "3268562"
 
 #=================================
-# Globals (Tkinter widget references)
+# Globals for Tkinter references
 #=================================
 input_entry = None
 output_folder_entry = None
@@ -56,10 +56,7 @@ def log_errors():
         f.write(traceback.format_exc())
 
 def get_ffmpeg_path():
-    """
-    Get the correct path to the FFmpeg executable, handling both development
-    and packaged environments.
-    """
+    # Gets the correct ffmpeg path based on the user's OS
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
         possible_paths = [
@@ -90,7 +87,7 @@ FFMPEG_PATH = get_ffmpeg_path()
 subprocess.run([FFMPEG_PATH, "-version"], check=True)
 
 def safe_update_ui(func) -> None:
-    """Safely update UI elements from any thread."""
+    # Safely updates UI elements from any CPU thread
     if not isinstance(func, str):
         app.after(0, func)
     else:
@@ -99,13 +96,13 @@ def safe_update_ui(func) -> None:
         app.after(0, update)
 
 def resource_path(relative_path: str) -> str:
-    """Get absolute path to a resource, works for dev and PyInstaller."""
+    # Gets the absolute path to the resource, works for dev and for PyInstaller
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.dirname(__file__), relative_path)
 
 def is_valid_url(input_url):
-    """Validate if a given URL is from a supported platform."""
+    # Validates URLs to ensure they're actually supported
     supported_domains = [
         'youtube.com', 'youtu.be',
         'music.youtube.com',
@@ -134,7 +131,7 @@ def initialize_pydub():
 # Update System Functions
 # =================================
 def handle_auto_update(latest_version: str) -> None:
-    """Handle the update process."""
+    # Handles the update process
     try:
         webbrowser.open(ITCH_GAME_URL)
         messagebox.showinfo(title="brb", message="This application will now close lol")
@@ -144,7 +141,7 @@ def handle_auto_update(latest_version: str) -> None:
         messagebox.showerror("Update Error", f"Failed to initialize update: {str(e)}")
 
 def check_for_updates(app) -> bool:
-    """Check for updates using itch.io's API."""
+    # Uses Itch.io's API to check for updates
     try:
         safe_update_ui(lambda: youtube_status_label.config(text="Hmmm..."))
         api_url = f"https://itch.io/api/1/{ITCH_API_KEY}/game/{ITCH_GAME_ID}/uploads"
@@ -466,7 +463,7 @@ def toggle_interface(enabled: bool = True) -> None:
         button.configure(state=state)
 
 #=================================
-# YouTube (and Twitch) Functions
+# Download-specific functions
 #=================================
 def get_format_string(quality, format_type):
     audio_formats = ["mp3", "wav", "flac", "ogg"]
