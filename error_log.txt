@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\Admin\Documents\GitHub\laces-total-file-converter\main.py", line 67, in <module>
-    app.mainloop()
-    ^^^^^^^^^^^^
-AttributeError: 'NoneType' object has no attribute 'mainloop'
