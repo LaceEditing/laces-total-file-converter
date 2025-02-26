@@ -8,6 +8,9 @@ import subprocess
 from urllib.parse import urlparse
 import traceback
 import logging
+from updater import AutoUpdater
+import json
+from pathlib import Path
 
 import requests
 import webbrowser
@@ -25,12 +28,15 @@ import vlc
 logging.basicConfig(level=logging.INFO)
 
 # Application Constants
-CURRENT_VERSION = "2.0.0"
+CURRENT_VERSION = "2.1.1"
 ITCH_GAME_URL = "https://laceediting.itch.io/laces-total-file-converter"
 ITCH_API_KEY = "TLSrZ5K4iHauDMTTqS9xfpBAx1Tsc6NPgTFrvcgj"
 ITCH_GAME_ID = "3268562"
+MAX_RECENT_FOLDERS = 5
+SETTINGS_FILE = "app_settings.json"
 
 bad_apple_overlay = None
+recent_folders_menu = None
 
 # Globals for Tkinter references
 input_entry = None
@@ -48,24 +54,169 @@ youtube_quality_var = None
 youtube_quality_dropdown = None
 app = None
 
+# Fix for PyInstaller
 if sys.version_info >= (3, 8) and os.name == 'nt':
-    os.add_dll_directory(os.path.abspath('.'))
+    if hasattr(os, 'add_dll_directory'):
+        if getattr(sys, 'frozen', False):
+            os.add_dll_directory(os.path.dirname(sys.executable))
+        else:
+            os.add_dll_directory(os.path.abspath('.'))
+
 
 def log_errors():
     with open("error_log.txt", "w") as f:
         f.write(traceback.format_exc())
 
+
+def resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.join(base_path, relative_path)
+
+
 def get_absolute_path(relative_path):
+    """Get absolute path to file that needs to be written to"""
     if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
+        # When frozen, use the directory containing the executable.
+        base_path = os.path.dirname(sys.executable)
     else:
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
-def resource_path(relative_path: str) -> str:
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.dirname(__file__), relative_path)
+
+# Defines the path for the settings file
+def get_settings_path():
+    """Get the path to the settings file"""
+    return get_absolute_path(SETTINGS_FILE)
+
+
+def load_settings():
+    """Load application settings from JSON file"""
+    settings_path = get_settings_path()
+    default_settings = {
+        "recent_folders": [],
+        "default_format": "mp4",
+        "use_gpu": True
+    }
+
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+                # Ensure all expected keys exist
+                for key in default_settings:
+                    if key not in settings:
+                        settings[key] = default_settings[key]
+                return settings
+    except Exception as e:
+        logging.error(f"Error loading settings: {e}")
+
+    return default_settings
+
+
+def save_settings(settings):
+    """Save application settings to JSON file"""
+    settings_path = get_settings_path()
+    try:
+        with open(settings_path, 'w') as f:
+            json.dump(settings, f, indent=4)
+        return True
+    except Exception as e:
+        logging.error(f"Error saving settings: {e}")
+        return False
+
+
+def add_recent_folder(folder_path):
+    """Add a folder to the recent folders list"""
+    settings = load_settings()
+    recent_folders = settings.get("recent_folders", [])
+
+    # Remove if already exists to avoid duplicates
+    if folder_path in recent_folders:
+        recent_folders.remove(folder_path)
+
+    # Add to the beginning of the list
+    recent_folders.insert(0, folder_path)
+
+    # Limit to MAX_RECENT_FOLDERS
+    settings["recent_folders"] = recent_folders[:MAX_RECENT_FOLDERS]
+
+    save_settings(settings)
+    update_recent_folders_menu()
+
+
+def update_recent_folders_menu():
+    """Update the recent folders dropdown menu"""
+    global recent_folders_menu
+
+    if recent_folders_menu is None:
+        return
+
+    # Clear existing menu items
+    recent_folders_menu.delete(0, tk.END)
+
+    # Get recent folders
+    settings = load_settings()
+    recent_folders = settings.get("recent_folders", [])
+
+    if not recent_folders:
+        recent_folders_menu.add_command(label="No recent folders", state=tk.DISABLED)
+        return
+
+    # Add each folder to the menu
+    for folder in recent_folders:
+        # Use a lambda with default argument to avoid late binding issue
+        recent_folders_menu.add_command(
+            label=Path(folder).name,  # Just show folder name for cleaner UI
+            command=lambda f=folder: set_output_folder(f)
+        )
+
+    # Add separator and clear option
+    if recent_folders:
+        recent_folders_menu.add_separator()
+        recent_folders_menu.add_command(
+            label="Clear Recent Folders",
+            command=clear_recent_folders
+        )
+
+
+def set_output_folder(folder):
+    """Set the output folder from the recent folders menu"""
+    output_folder_entry.delete(0, tk.END)
+    output_folder_entry.insert(0, folder)
+
+
+def clear_recent_folders():
+    """Clear the list of recent folders"""
+    settings = load_settings()
+    settings["recent_folders"] = []
+    save_settings(settings)
+    update_recent_folders_menu()
+
+
+def show_recent_folders_menu(button):
+    """Show the recent folders menu under the button"""
+    global recent_folders_menu
+    # Force menu update before showing
+    update_recent_folders_menu()
+    # Show the menu
+    try:
+        recent_folders_menu.tk_popup(
+            button.winfo_rootx(),
+            button.winfo_rooty() + button.winfo_height()
+        )
+    finally:
+        # Make sure to release the grab
+        recent_folders_menu.grab_release()
+
 
 def verify_video_setup():
     logging.info("Verifying video playback setup")
@@ -78,26 +229,40 @@ def verify_video_setup():
         exists = os.path.exists(path)
         logging.info(f"{name} path check: {path} - {'EXISTS' if exists else 'MISSING'}")
 
+
 def get_ffmpeg_path():
     if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
+        base_path = os.path.dirname(sys.executable)
         ffmpeg_path = os.path.join(base_path, 'ffmpeg.exe')
         if not os.path.exists(ffmpeg_path):
-            raise FileNotFoundError("FFmpeg executable not found in application bundle")
+            logging.error(f"FFmpeg not found at {ffmpeg_path}")
+            # Try with resource_path as fallback
+            ffmpeg_path = resource_path('ffmpeg.exe')
+            if not os.path.exists(ffmpeg_path):
+                raise FileNotFoundError("FFmpeg executable not found in application bundle")
         return ffmpeg_path
     else:
         base_path = os.path.dirname(os.path.abspath(__file__))
         ffmpeg_path = os.path.join(base_path, 'dist', 'ffmpeg', 'bin', 'ffmpeg.exe')
         if not os.path.exists(ffmpeg_path):
-            from shutil import which
-            system_ffmpeg = which('ffmpeg.exe')
-            if system_ffmpeg:
-                return system_ffmpeg
-            raise FileNotFoundError("FFmpeg not found in expected development location or system PATH.")
+            # Try direct path
+            ffmpeg_path = os.path.join(base_path, 'ffmpeg.exe')
+            if not os.path.exists(ffmpeg_path):
+                from shutil import which
+                system_ffmpeg = which('ffmpeg.exe')
+                if system_ffmpeg:
+                    return system_ffmpeg
+                raise FileNotFoundError("FFmpeg not found in expected development location or system PATH.")
         return ffmpeg_path
 
-FFMPEG_PATH = get_ffmpeg_path()
-subprocess.run([FFMPEG_PATH, "-version"], check=True)
+
+try:
+    FFMPEG_PATH = get_ffmpeg_path()
+    subprocess.run([FFMPEG_PATH, "-version"], check=True)
+except Exception as e:
+    logging.error(f"Error initializing FFmpeg: {e}")
+    FFMPEG_PATH = None
+
 
 def safe_update_ui(func) -> None:
     if not isinstance(func, str):
@@ -105,7 +270,9 @@ def safe_update_ui(func) -> None:
     else:
         def update():
             eval(func)
+
         app.after(0, update)
+
 
 def is_valid_url(input_url):
     supported_domains = [
@@ -132,6 +299,7 @@ def is_valid_url(input_url):
     except Exception:
         return False
 
+
 def safe_filename(filepath):
     import string
     allowed_chars = string.ascii_letters + string.digits + " ._-()"
@@ -154,57 +322,76 @@ def safe_filename(filepath):
             return filepath
     return filepath
 
-# Update System Functions
-def handle_auto_update(latest_version: str) -> None:
-    try:
-        webbrowser.open(ITCH_GAME_URL)
-        messagebox.showinfo(title="brb", message="This application will now close lol")
-        app.quit()
-        sys.exit(0)
-    except Exception as e:
-        messagebox.showerror("Update Error", f"Failed to initialize update: {str(e)}")
 
 def check_for_updates(app) -> bool:
     try:
-        safe_update_ui(lambda: youtube_status_label.config(text="Hmmm..."))
-        api_url = f"https://itch.io/api/1/{ITCH_API_KEY}/game/{ITCH_GAME_ID}/uploads"
-        response = requests.get(api_url, headers={"Content-Type": "application/json"}, timeout=5)
-        response.raise_for_status()
-        uploads_data = response.json()
-        if 'uploads' in uploads_data:
-            latest_upload = max(uploads_data['uploads'], key=lambda x: x.get('created_at', ''))
-            filename = latest_upload.get('filename', '')
-            version_match = re.search(r'v(\d+\.\d+(?:\.\d+)?)', filename)
-            if version_match:
-                latest_version = version_match.group(1)
-                current_ver = version.parse(CURRENT_VERSION)
-                latest_ver = version.parse(latest_version)
-                if latest_ver > current_ver:
-                    update_message = f"""
+        safe_update_ui(lambda: youtube_status_label.config(text="Checking for updates..."))
+
+        # Create updater instance
+        updater = AutoUpdater(
+            current_version=CURRENT_VERSION,
+            itch_api_key=ITCH_API_KEY,
+            itch_game_id=ITCH_GAME_ID,
+            itch_game_url=ITCH_GAME_URL,
+            app_root=None  # Will be determined automatically
+        )
+
+        # Check if an update is available
+        update_available, latest_version, _ = updater.check_for_updates()
+
+        if update_available:
+            update_message = f"""
 A new version ({latest_version}) is available!
 You're currently running version {CURRENT_VERSION}
 
-Go to latest version's download page?
+Would you like to download and install the update automatically?
 """
-                    if messagebox.askyesnocancel("Update Available", update_message, parent=app):
-                        handle_auto_update(latest_version)
-                    return True
-            safe_update_ui(lambda: youtube_status_label.config(text="You're running the latest version! Good job!"))
+            if messagebox.askyesnocancel("Update Available", update_message, parent=app):
+                # Start the update download process
+                safe_update_ui(lambda: youtube_status_label.config(text="Downloading update..."))
+                updater.download_update(parent_window=app)
+                return True
+
+            # If user cancels, ask if they want to just go to the download page
+            if messagebox.askyesno("Manual Update",
+                                   "Would you like to go to the download page instead?",
+                                   parent=app):
+                handle_manual_update()
+
+            return True
+
+        safe_update_ui(lambda: youtube_status_label.config(text="You're running the latest version! Good job!"))
         return False
-    except requests.RequestException:
+    except Exception as e:
+        logging.error(f"Error checking for updates: {e}")
         safe_update_ui(lambda: youtube_status_label.config(text="Update check failed - will try again later"))
-        return False
-    except Exception:
         return False
     finally:
         app.after(3000, lambda: safe_update_ui(lambda: youtube_status_label.config(text="Download Status: Idle")))
 
+
+def handle_manual_update() -> None:
+    """Open the Itch.io page for manual download"""
+    try:
+        webbrowser.open(ITCH_GAME_URL)
+        messagebox.showinfo(title="Manual Update", message="Opening download page in your browser.")
+    except Exception as e:
+        messagebox.showerror("Update Error", f"Failed to open download page: {str(e)}")
+
+
 def setup_auto_update_checker(app) -> None:
+    """Schedule periodic update checks"""
+    # First check after 1 second
     app.after(1000, lambda: check_for_updates(app))
+
+    # Schedule daily checks (86400000 ms = 24 hours)
     def schedule_next_check():
         check_for_updates(app)
         app.after(86400000, schedule_next_check)
+
+    # Also schedule check every 24 hours
     app.after(86400000, schedule_next_check)
+
 
 def show_about() -> None:
     messagebox.showinfo(
@@ -214,7 +401,9 @@ def show_about() -> None:
         "Created with ♥ by Lace"
     )
 
+
 def add_update_menu(app, menubar) -> None:
+    """Add update-related menu items"""
     help_menu = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="Help", menu=help_menu)
     help_menu.add_command(label="Check for Updates", command=lambda: check_for_updates(app))
@@ -222,6 +411,7 @@ def add_update_menu(app, menubar) -> None:
     help_menu.add_command(label="Visit Itch.io Page", command=lambda: webbrowser.open(ITCH_GAME_URL))
     help_menu.add_separator()
     help_menu.add_command(label="About", command=show_about)
+
 
 # Video Playback using python-vlc
 def show_vlc_overlay(video_path, duration=11):
@@ -235,49 +425,57 @@ def show_vlc_overlay(video_path, duration=11):
     video_frame = tk.Frame(overlay, bg="black")
     video_frame.pack(expand=True, fill="both")
 
-    instance = vlc.Instance()
-    player = instance.media_player_new()
+    try:
+        instance = vlc.Instance()
+        player = instance.media_player_new()
 
-    video_frame.update_idletasks()
-    hwnd = video_frame.winfo_id()
-    player.set_hwnd(hwnd)
+        video_frame.update_idletasks()
+        hwnd = video_frame.winfo_id()
+        player.set_hwnd(hwnd)
 
-    media = instance.media_new(video_path)
-    player.set_media(media)
-    player.play()
-    logging.info(f"Starting VLC playback for {video_path}")
+        media = instance.media_new(video_path)
+        player.set_media(media)
+        player.play()
+        logging.info(f"Starting VLC playback for {video_path}")
 
-    def cover_video():
-        try:
-            media.parse()
-            tracks = media.get_tracks_info()
-            if not tracks:
-                return
-            container_w = video_frame.winfo_width()
-            container_h = video_frame.winfo_height()
-            player.video_set_scale(0)
-            player.video_set_aspect_ratio(f"{container_w}:{container_h}")
-            player.set_hwnd(video_frame.winfo_id())
-            logging.info(f"Video container dimensions: {container_w}x{container_h}")
-        except Exception as e:
-            logging.error(f"Error adjusting video scaling: {e}")
+        def cover_video():
+            try:
+                media.parse()
+                tracks = media.get_tracks_info()
+                if not tracks:
+                    return
+                container_w = video_frame.winfo_width()
+                container_h = video_frame.winfo_height()
+                player.video_set_scale(0)
+                player.video_set_aspect_ratio(f"{container_w}:{container_h}")
+                player.set_hwnd(video_frame.winfo_id())
+                logging.info(f"Video container dimensions: {container_w}x{container_h}")
+            except Exception as e:
+                logging.error(f"Error adjusting video scaling: {e}")
 
-    overlay.after(500, cover_video)
+        overlay.after(500, cover_video)
 
-    def close_overlay():
-        time.sleep(duration)
-        player.stop()
-        overlay.destroy()
-        logging.info("VLC playback ended; overlay destroyed.")
+        def close_overlay():
+            time.sleep(duration)
+            player.stop()
+            overlay.destroy()
+            logging.info("VLC playback ended; overlay destroyed.")
 
-    threading.Thread(target=close_overlay, daemon=True).start()
+        threading.Thread(target=close_overlay, daemon=True).start()
+    except Exception as e:
+        logging.error(f"Error in VLC playback: {e}")
+        messagebox.showerror("Video Error", "Could not play video. Check error_log.txt for details.")
+        if overlay:
+            overlay.destroy()
+
 
 def show_bad_apple_easter_egg():
     video_path = resource_path(os.path.join("assets", "BaddAscle.mp4"))
     logging.info(f"Verifying video at: {video_path}")
     if not os.path.exists(video_path):
         logging.error(f"Video file not found at expected path: {video_path}")
-        messagebox.showerror("Easter Egg Error", "Video file not found or inaccessible. Please verify application installation.")
+        messagebox.showerror("Easter Egg Error",
+                             "Video file not found or inaccessible. Please verify application installation.")
         return
     try:
         logging.info(f"Preparing to play video from: {video_path}")
@@ -286,6 +484,7 @@ def show_bad_apple_easter_egg():
         error_msg = f"Easter egg playback failed: {str(e)}\n{traceback.format_exc()}"
         logging.error(error_msg)
         messagebox.showerror("Easter Egg Error", "The easter egg couldn't be played. Check error_log.txt for details.")
+
 
 # Core Application Logic
 def direct_ffmpeg_gpu_video2video(input_path: str, output_path: str, output_format: str) -> None:
@@ -332,17 +531,22 @@ def direct_ffmpeg_gpu_video2video(input_path: str, output_path: str, output_form
     except Exception:
         raise
 
+
 def initialize_ffmpeg_paths():
     try:
         ffmpeg_path = get_ffmpeg_path()
         if getattr(sys, 'frozen', False):
             ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), 'ffprobe.exe')
+            if not os.path.exists(ffprobe_path):
+                ffprobe_path = resource_path('ffprobe.exe')
         else:
             if sys.platform == 'win32':
                 from shutil import which
                 ffprobe_path = which('ffprobe.exe')
                 if not ffprobe_path:
-                    raise FileNotFoundError("FFprobe not found in PATH")
+                    ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), 'ffprobe.exe')
+                    if not os.path.exists(ffprobe_path):
+                        raise FileNotFoundError("FFprobe not found in PATH")
             else:
                 ffprobe_path = "ffprobe"
         if not os.path.exists(ffmpeg_path):
@@ -355,6 +559,7 @@ def initialize_ffmpeg_paths():
         return ffmpeg_path, ffprobe_path
     except Exception:
         raise
+
 
 def convert_audio(input_paths: list, output_folder: str, output_format: str,
                   progress_var: tk.IntVar, convert_button: tk.Button, use_gpu: bool) -> None:
@@ -451,27 +656,40 @@ def convert_audio(input_paths: list, output_folder: str, output_format: str,
                     raise ValueError(f"Unrecognized conversion scenario: {input_extension} -> {output_format}")
 
                 if "ffmpeg_cmd" in locals():
-                    subprocess.run(ffmpeg_cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW,
-                                   capture_output=True, text=True, shell=False)
+                    # For PyInstaller, ensure we use CREATE_NO_WINDOW on Windows only
+                    if sys.platform == 'win32':
+                        subprocess.run(ffmpeg_cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW,
+                                       capture_output=True, text=True, shell=False)
+                    else:
+                        subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, shell=False)
 
                 progress_var.set(int((idx / total_files) * 100))
                 update_button(f"Converting: {progress_var.get()}%")
 
             except subprocess.CalledProcessError as e:
-                safe_update_ui(lambda: messagebox.showerror("Error", f"FFmpeg failed to convert {file_name}: {str(e)}", parent=app))
+                safe_update_ui(lambda: messagebox.showerror("Error", f"FFmpeg failed to convert {file_name}: {str(e)}",
+                                                            parent=app))
                 return
             except Exception as e:
-                safe_update_ui(lambda: messagebox.showerror("Error", f"Error converting {file_name}: {str(e)}", parent=app))
+                safe_update_ui(
+                    lambda: messagebox.showerror("Error", f"Error converting {file_name}: {str(e)}", parent=app))
                 return
 
         def show_completion_dialog():
             convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
             youtube_status_label.config(text="Conversion Complete! ^.^")
+
             def prompt_open_folder():
-                if messagebox.askyesnocancel("Success!", "Conversion complete! Do you wanna open the output folder?", parent=app):
-                    os.startfile(output_folder)
+                if messagebox.askyesnocancel("Success!", "Conversion complete! Do you wanna open the output folder?",
+                                             parent=app):
+                    if sys.platform == 'win32':
+                        os.startfile(output_folder)
+                    else:
+                        import subprocess
+                        subprocess.Popen(['xdg-open', output_folder])
                 convert_button.config(text="CONVERT", bg="#9370DB", fg="white")
                 app.update_idletasks()
+
             global bad_apple_overlay
             if bad_apple_overlay is not None and bad_apple_overlay.winfo_exists():
                 bad_apple_overlay.bind("<Destroy>", lambda event: prompt_open_folder())
@@ -483,8 +701,10 @@ def convert_audio(input_paths: list, output_folder: str, output_format: str,
         safe_update_ui(lambda: messagebox.showerror("Error", f"Conversion failed: {str(e)}", parent=app))
         traceback.print_exc()
 
+
 def punish_user_with_maths() -> bool:
     result = [False]
+
     def show_math_dialog():
         messagebox.showinfo("WOAH THERE HOLD YOUR HORSES FRIEND",
                             "Converting an audio file to a video file is literally not a thing. Ok, let's test your brain.",
@@ -508,6 +728,7 @@ def punish_user_with_maths() -> bool:
                     messagebox.showinfo("bruh...", "ok bye", parent=app)
                     app.destroy()
                     return
+
     app.after(0, show_math_dialog)
     while app.winfo_exists():
         app.update()
@@ -515,6 +736,7 @@ def punish_user_with_maths() -> bool:
             return True
         time.sleep(0.1)
     return False
+
 
 # UI Event Handlers
 def on_drop(event) -> None:
@@ -525,6 +747,7 @@ def on_drop(event) -> None:
     except Exception as e:
         messagebox.showerror("Error", f"Failed to process dropped files: {e}", parent=app)
 
+
 def select_input() -> None:
     input_selected = filedialog.askopenfilenames(
         filetypes=[("Media files", "*.mp3;*.wav;*.ogg;*.flac;*.m4a;*.mp4;*.avi;*.mov;*.mkv;*.webm;*.flv")]
@@ -533,14 +756,20 @@ def select_input() -> None:
         input_entry.delete(0, tk.END)
         input_entry.insert(0, ";".join(input_selected))
 
+
 def select_output_folder() -> None:
     folder_selected = filedialog.askdirectory()
-    output_folder_entry.delete(0, tk.END)
-    output_folder_entry.insert(0, folder_selected)
+    if folder_selected:
+        output_folder_entry.delete(0, tk.END)
+        output_folder_entry.insert(0, folder_selected)
+        add_recent_folder(folder_selected)
+
 
 def start_conversion() -> None:
     input_paths = input_entry.get().strip().split(";")
     output_folder = output_folder_entry.get().strip()
+    if output_folder and os.path.isdir(output_folder):
+        add_recent_folder(output_folder)
     output_format = format_dropdown.get()
     valid_formats = ["wav", "ogg", "flac", "mp3", "m4a", "mp4", "mkv", "avi", "mov", "webm", "flv"]
     if not input_paths or not input_paths[0]:
@@ -561,6 +790,7 @@ def start_conversion() -> None:
     thread = threading.Thread(target=conversion_thread, daemon=True)
     thread.start()
 
+
 def toggle_interface(enabled: bool = True) -> None:
     widgets = [input_entry, output_folder_entry, youtube_link_entry, format_dropdown, convert_button, gpu_checkbox]
     state = 'normal' if enabled else 'disabled'
@@ -569,6 +799,7 @@ def toggle_interface(enabled: bool = True) -> None:
     for button in [b for b in app.winfo_children() if isinstance(b, tk.Button)]:
         button.configure(state=state)
 
+
 # Download-specific functions
 def on_youtube_format_change(event=None):
     audio_formats = ["mp3", "wav", "flac", "ogg", "m4a"]
@@ -576,11 +807,12 @@ def on_youtube_format_change(event=None):
     audio_bitrates = ["128kb/s", "192kb/s", "256kb/s", "320kb/s"]
     selected_format = youtube_format_var.get()
     if selected_format in audio_formats:
-         youtube_quality_dropdown['values'] = audio_bitrates
-         youtube_quality_var.set("256kb/s")
+        youtube_quality_dropdown['values'] = audio_bitrates
+        youtube_quality_var.set("256kb/s")
     else:
-         youtube_quality_dropdown['values'] = video_quality_options
-         youtube_quality_var.set("1080p")
+        youtube_quality_dropdown['values'] = video_quality_options
+        youtube_quality_var.set("1080p")
+
 
 def get_format_string(quality, format_type):
     audio_formats = ["mp3", "wav", "flac", "ogg", "m4a"]
@@ -597,10 +829,14 @@ def get_format_string(quality, format_type):
     video_format = quality_map.get(quality, "bestvideo[height<=1080]")
     return f"{video_format}[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"
 
+
 def modify_download_options(ydl_opts, quality, format_type):
     try:
         ffmpeg_path = get_ffmpeg_path()
-        ffprobe_path = ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')
+        ffprobe_path = os.path.join(os.path.dirname(ffmpeg_path), 'ffprobe.exe')
+        if not os.path.exists(ffprobe_path) and getattr(sys, 'frozen', False):
+            ffprobe_path = resource_path('ffprobe.exe')
+
         ydl_opts.update({
             'ffmpeg_location': ffmpeg_path,
             'prefer_ffmpeg': True,
@@ -678,6 +914,7 @@ def modify_download_options(ydl_opts, quality, format_type):
     except Exception:
         raise
 
+
 def yt_dlp_progress_hook(d: dict) -> None:
     def update():
         if d['status'] == 'downloading':
@@ -699,7 +936,9 @@ def yt_dlp_progress_hook(d: dict) -> None:
         elif d['status'] == 'error':
             youtube_status_label.config(text="AAAAAH!")
             convert_button.config(text="CONVERT", fg="white")
+
     safe_update_ui(update)
+
 
 def download_video():
     global youtube_format_var, youtube_quality_var, youtube_quality_dropdown
@@ -712,9 +951,12 @@ def download_video():
             'YouTube', 'YouTube Music', 'Twitch VOD', 'Twitter', 'TikTok', 'Dailymotion', 'Vimeo', 'Instagram Reels',
             'Facebook', 'SoundCloud', 'Bandcamp', 'Reddit', 'OK.ru', 'Rumble'
         ]
-        messagebox.showerror("Error", f"Please provide a valid URL from a supported platform:\n\n{', '.join(supported_platforms)}.")
+        messagebox.showerror("Error",
+                             f"Please provide a valid URL from a supported platform:\n\n{', '.join(supported_platforms)}.")
         return
     output_folder = output_folder_entry.get().strip()
+    if output_folder and os.path.isdir(output_folder):
+        add_recent_folder(output_folder)
     if not output_folder:
         messagebox.showerror("Error", "Please select an output folder.")
         return
@@ -722,7 +964,8 @@ def download_video():
         format_type = youtube_format_var.get()
         quality = youtube_quality_var.get()
         if 'music.youtube.com' in input_url and format_type not in ['mp3', 'wav', 'flac', 'ogg', 'm4a']:
-            safe_update_ui(lambda: youtube_status_label.config(text="Extracting Playlist Data - This may take a while..."))
+            safe_update_ui(
+                lambda: youtube_status_label.config(text="Extracting Playlist Data - This may take a while..."))
             format_type = 'mp3'
             youtube_format_var.set('mp3')
             messagebox.showinfo("Format Changed",
@@ -754,12 +997,18 @@ def download_video():
             ydl_opts = modify_download_options(ydl_opts, quality, format_type)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([input_url])
+
             def prompt_user():
                 safe_update_ui(lambda: youtube_status_label.config(text="Download Complete! ^.^"))
                 if messagebox.askyesnocancel("Success!", "Do you wanna open the output folder?", parent=app):
-                    os.startfile(output_folder)
+                    if sys.platform == 'win32':
+                        os.startfile(output_folder)
+                    else:
+                        import subprocess
+                        subprocess.Popen(['xdg-open', output_folder])
                 safe_update_ui(lambda: toggle_interface(True))
                 safe_update_ui(lambda: convert_button.config(text="CONVERT", fg="white"))
+
             global bad_apple_overlay
             if bad_apple_overlay is not None and bad_apple_overlay.winfo_exists():
                 bad_apple_overlay.bind("<Destroy>", lambda event: prompt_user())
@@ -767,7 +1016,8 @@ def download_video():
                 prompt_user()
         except yt_dlp.utils.DownloadError as download_error:
             safe_update_ui(lambda: youtube_status_label.config(text="Download failed!"))
-            safe_update_ui(lambda: messagebox.showerror("Download Error", f"Failed to download video: {str(download_error)}"))
+            safe_update_ui(
+                lambda: messagebox.showerror("Download Error", f"Failed to download video: {str(download_error)}"))
         except Exception as general_error:
             safe_update_ui(lambda: youtube_status_label.config(text="Error occurred!"))
             safe_update_ui(lambda: messagebox.showerror("Error", f"An unexpected error occurred: {str(general_error)}"))
@@ -782,6 +1032,7 @@ def download_video():
     thread = threading.Thread(target=download_thread, daemon=True)
     thread.start()
 
+
 # Main Application Setup
 def setup_fonts() -> tuple:
     try:
@@ -789,32 +1040,50 @@ def setup_fonts() -> tuple:
         import ctypes.wintypes
         bubblegum_path = resource_path(os.path.join('assets', 'fonts', 'BubblegumSans-Regular.ttf'))
         bartino_path = resource_path(os.path.join('assets', 'fonts', 'Bartino.ttf'))
-        ctypes.windll.gdi32.AddFontResourceW(bubblegum_path)
-        ctypes.windll.gdi32.AddFontResourceW(bartino_path)
+        # Only load fonts on Windows
+        if sys.platform == 'win32' and hasattr(ctypes.windll, 'gdi32'):
+            ctypes.windll.gdi32.AddFontResourceW(bubblegum_path)
+            ctypes.windll.gdi32.AddFontResourceW(bartino_path)
         title_font = tkFont.Font(family="Bubblegum Sans", size=32)
         regular_font = tkFont.Font(family="Bartino", size=14)
         return (title_font, regular_font)
-    except Exception:
+    except Exception as e:
+        logging.error(f"Error setting up fonts: {e}")
         return (
             tkFont.Font(family="Arial", size=32, weight="bold"),
             tkFont.Font(family="Arial", size=14)
         )
 
+
 def setup_main_window() -> None:
-    if hasattr(sys, "_MEIPASS"):
-        tcl_dnd_path = os.path.join(sys._MEIPASS, "tkinterdnd2", "tkdnd", "win-x64")
-        os.environ["TCLLIBPATH"] = tcl_dnd_path
-    icon_path = resource_path(os.path.join('assets', 'icons', 'icon.png'))
-    icon_img = PhotoImage(file=icon_path)
-    app.iconphoto(False, icon_img)
-    app.title(f"Hey besties let's convert those files (v{CURRENT_VERSION})")
-    app.configure(bg="#E6E6FA")
-    app.geometry("700x550")
-    app.minsize(900, 875)
-    app.resizable(True, True)
-    app.call('wm', 'iconphoto', app._w, '-default', icon_img)
-    app.drop_target_register(DND_FILES)
-    app.dnd_bind("<<Drop>>", on_drop)
+    try:
+        if getattr(sys, 'frozen', False):
+            # Use the directory where the executable is located to find tcl_dnd.
+            base_path = os.path.dirname(sys.executable)
+            tcl_dnd_path = os.path.join(base_path, "tkinterdnd2", "tkdnd", "win-x64")
+            os.environ["TCLLIBPATH"] = tcl_dnd_path
+
+        # Load icon using resource_path
+        icon_path = resource_path(os.path.join('assets', 'icons', 'icon.png'))
+        if os.path.exists(icon_path):
+            icon_img = PhotoImage(file=icon_path)
+            app.iconphoto(False, icon_img)
+            app.call('wm', 'iconphoto', app._w, '-default', icon_img)
+        else:
+            logging.error(f"Icon not found at: {icon_path}")
+
+        app.title(f"Hey besties let's convert those files (v{CURRENT_VERSION})")
+        app.configure(bg="#E6E6FA")
+        app.geometry("700x550")
+        app.minsize(900, 875)
+        app.resizable(True, True)
+
+        app.drop_target_register(DND_FILES)
+        app.dnd_bind("<<Drop>>", on_drop)
+    except Exception as e:
+        logging.error(f"Error setting up main window: {e}")
+        # Continue without customizations if there are errors
+
 
 def create_ui_components() -> None:
     title_font, regular_font = setup_fonts()
@@ -822,6 +1091,27 @@ def create_ui_components() -> None:
     app.config(menu=menubar)
     add_update_menu(app, menubar)
     setup_auto_update_checker(app)
+
+    # Define the create_recent_folders_button function here, after regular_font is available
+    def create_recent_folders_button(parent, row, column):
+        """Create a button that shows recent folders in a dropdown"""
+        global recent_folders_menu
+
+        # Create menu
+        recent_folders_menu = tk.Menu(app, tearoff=0)
+        update_recent_folders_menu()
+
+        # Create button that shows menu on click
+        button = tk.Button(
+            parent,
+            text="Recent",
+            bg="#DDA0DD",
+            fg="white",
+            font=regular_font,
+            command=lambda: show_recent_folders_menu(button)
+        )
+        button.grid(row=row, column=column, padx=5, pady=10)
+        return button
 
     global input_entry, output_folder_entry, youtube_link_entry, format_dropdown
     global convert_button, gpu_checkbox, youtube_status_label, progress_var
@@ -837,20 +1127,28 @@ def create_ui_components() -> None:
     header_label = tk.Label(main_frame, text="Lace's Total File Converter", font=title_font, bg="#E6E6FA", fg="#6A0DAD")
     header_label.grid(row=0, column=0, columnspan=3, pady=(0, 20), sticky="ew")
 
-    output_frame = tk.LabelFrame(main_frame, text="Output Location", bg="#E6E6FA", font=regular_font, fg="#6A0DAD", pady=10)
+    output_frame = tk.LabelFrame(main_frame, text="Output Location", bg="#E6E6FA", font=regular_font, fg="#6A0DAD",
+                                 pady=10)
     output_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 20))
     output_frame.grid_columnconfigure(1, weight=1)
 
-    tk.Label(output_frame, text="Output Folder:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+    tk.Label(output_frame, text="Output Folder:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10,
+                                                                                        pady=10, sticky="w")
     output_folder_entry = tk.Entry(output_frame, width=50, font=regular_font)
     output_folder_entry.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
-    tk.Button(output_frame, text="Browse", command=select_output_folder, bg="#DDA0DD", fg="white", font=regular_font).grid(row=0, column=2, padx=10, pady=10)
+    tk.Button(output_frame, text="Browse", command=select_output_folder, bg="#DDA0DD", fg="white",
+              font=regular_font).grid(row=0, column=2, padx=10, pady=10)
 
-    video_frame = tk.LabelFrame(main_frame, text="Video Download", bg="#E6E6FA", font=regular_font, fg="#6A0DAD", pady=10)
+    # Now we can call create_recent_folders_button AFTER output_frame is defined
+    create_recent_folders_button(output_frame, 0, 3)
+
+    video_frame = tk.LabelFrame(main_frame, text="Video Download", bg="#E6E6FA", font=regular_font, fg="#6A0DAD",
+                                pady=10)
     video_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 20))
     video_frame.grid_columnconfigure(1, weight=1)
 
-    tk.Label(video_frame, text="Video URL:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+    tk.Label(video_frame, text="Video URL:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10, pady=5,
+                                                                                   sticky="w")
     youtube_link_entry = tk.Entry(video_frame, width=50, font=regular_font)
     youtube_link_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
 
@@ -866,7 +1164,8 @@ def create_ui_components() -> None:
 
     tk.Label(options_frame, text="Format:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10, sticky="w")
     youtube_format_dropdown = ttk.Combobox(options_frame, textvariable=youtube_format_var,
-                                           values=["mp4", "mkv", "webm", "avi", "flv", "mp3", "wav", "flac", "ogg", "m4a"],
+                                           values=["mp4", "mkv", "webm", "avi", "flv", "mp3", "wav", "flac", "ogg",
+                                                   "m4a"],
                                            font=regular_font, state="readonly")
     youtube_format_dropdown.grid(row=0, column=1, padx=10, sticky="ew")
     youtube_format_dropdown.bind("<<ComboboxSelected>>", on_youtube_format_change)
@@ -878,25 +1177,32 @@ def create_ui_components() -> None:
     youtube_quality_dropdown.grid(row=0, column=3, padx=10, sticky="ew")
     on_youtube_format_change()
 
-    tk.Button(video_frame, text="DOWNLOAD", command=download_video, bg="#9370DB", fg="white", font=regular_font).grid(row=3, column=0, columnspan=3, pady=10, sticky="ew")
+    tk.Button(video_frame, text="DOWNLOAD", command=download_video, bg="#9370DB", fg="white", font=regular_font).grid(
+        row=3, column=0, columnspan=3, pady=10, sticky="ew")
 
-    conversion_frame = tk.LabelFrame(main_frame, text="File Conversion", bg="#E6E6FA", font=regular_font, fg="#6A0DAD", pady=10)
+    conversion_frame = tk.LabelFrame(main_frame, text="File Conversion", bg="#E6E6FA", font=regular_font, fg="#6A0DAD",
+                                     pady=10)
     conversion_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 20))
     conversion_frame.grid_columnconfigure(1, weight=1)
 
-    tk.Label(conversion_frame, text="Input Files:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+    tk.Label(conversion_frame, text="Input Files:", bg="#E6E6FA", font=regular_font).grid(row=0, column=0, padx=10,
+                                                                                          pady=5, sticky="w")
     input_entry = tk.Entry(conversion_frame, width=50, font=regular_font)
     input_entry.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
-    tk.Button(conversion_frame, text="Browse", command=select_input, bg="#DDA0DD", fg="white", font=regular_font).grid(row=0, column=2, padx=10, pady=5)
+    tk.Button(conversion_frame, text="Browse", command=select_input, bg="#DDA0DD", fg="white", font=regular_font).grid(
+        row=0, column=2, padx=10, pady=5)
 
-    tk.Label(conversion_frame, text="Output Format:", bg="#E6E6FA", font=regular_font).grid(row=1, column=0, padx=10, pady=5, sticky="w")
+    tk.Label(conversion_frame, text="Output Format:", bg="#E6E6FA", font=regular_font).grid(row=1, column=0, padx=10,
+                                                                                            pady=5, sticky="w")
     format_var = tk.StringVar(value="mp4")
     format_dropdown = ttk.Combobox(conversion_frame, textvariable=format_var,
-                                   values=["wav", "ogg", "flac", "mp3", "m4a", "mp4", "mkv", "avi", "mov", "webm", "flv"],
+                                   values=["wav", "ogg", "flac", "mp3", "m4a", "mp4", "mkv", "avi", "mov", "webm",
+                                           "flv"],
                                    font=regular_font, state="readonly")
     format_dropdown.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
 
-    convert_button = tk.Button(conversion_frame, text="CONVERT", command=start_conversion, bg="#9370DB", fg="white", font=regular_font)
+    convert_button = tk.Button(conversion_frame, text="CONVERT", command=start_conversion, bg="#9370DB", fg="white",
+                               font=regular_font)
     convert_button.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew")
 
     bottom_frame = tk.Frame(main_frame, bg="#E6E6FA")
@@ -904,7 +1210,8 @@ def create_ui_components() -> None:
     bottom_frame.grid_columnconfigure(0, weight=1)
 
     gpu_var = tk.BooleanVar(value=True)
-    gpu_checkbox = tk.Checkbutton(bottom_frame, text="GPU Encode (Significantly Faster)", bg="#E6E6FA", font=regular_font, variable=gpu_var)
+    gpu_checkbox = tk.Checkbutton(bottom_frame, text="GPU Encode (Significantly Faster)", bg="#E6E6FA",
+                                  font=regular_font, variable=gpu_var)
     gpu_checkbox.grid(row=0, column=0, pady=5, sticky="ew")
 
     youtube_status_label = tk.Label(bottom_frame, text="Download Status: Idle", bg="#E6E6FA", font=regular_font)
@@ -913,12 +1220,19 @@ def create_ui_components() -> None:
     app.grid_rowconfigure(0, weight=1)
     app.grid_columnconfigure(0, weight=1)
 
+
 if __name__ == "__main__":
     try:
         app = TkinterDnD.Tk()
-        format_var = tk.StringVar()
-        gpu_var = tk.BooleanVar(value=True)
+
+        # Load application settings
+        app_settings = load_settings()
+
+        # Initialize variables with values from settings
+        format_var = tk.StringVar(value=app_settings.get("default_format", "mp4"))
+        gpu_var = tk.BooleanVar(value=app_settings.get("use_gpu", True))
         progress_var = tk.IntVar()
+
         verify_video_setup()
         try:
             ffmpeg_path, ffprobe_path = initialize_ffmpeg_paths()
@@ -927,6 +1241,7 @@ if __name__ == "__main__":
             sys.exit(1)
         setup_main_window()
         create_ui_components()
+        update_recent_folders_menu()  # Initialize the menu after UI is created
         app.mainloop()
     except Exception:
         log_errors()
