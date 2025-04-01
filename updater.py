@@ -14,17 +14,22 @@ import packaging.version as version
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', None)
+
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('updater')
 
 
 class AutoUpdater:
-    def __init__(self, current_version, itch_api_key, itch_game_id, itch_game_url, app_root=None):
+    def __init__(self, current_version, github_repo, github_token=None, app_root=None):
         self.current_version = current_version
-        self.itch_api_key = itch_api_key
-        self.itch_game_id = itch_game_id
-        self.itch_game_url = itch_game_url
+        self.github_repo = "LaceEditing/laces-total-file-converter"
+        try:
+            from embed_token import GITHUB_TOKEN as embedded_token
+            self.github_token = github_token or embedded_token
+        except ImportError:
+            self.github_token = github_token
         self.app_root = app_root or (os.path.dirname(sys.executable)
                                      if getattr(sys, 'frozen', False)
                                      else os.path.dirname(os.path.abspath(__file__)))
@@ -37,58 +42,163 @@ class AutoUpdater:
         self.cancel_update = False
 
     def check_for_updates(self):
-        """Check if an update is available"""
         logger.info(f"Checking for updates. Current version: {self.current_version}")
-
         try:
-            api_url = f"https://itch.io/api/1/{self.itch_api_key}/game/{self.itch_game_id}/uploads"
-            response = requests.get(api_url, headers={"Content-Type": "application/json"}, timeout=10)
+            owner_repo = self.github_repo  # "LaceEditing/laces-total-file-converter"
+            api_url = f"https://api.github.com/repos/{owner_repo}/releases/latest"
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"LacesUpdater/{self.current_version}"
+            }
+            if self.github_token:
+                headers["Authorization"] = f"Bearer {self.github_token}"
+
+            logger.info(f"Requesting latest release from: {api_url}")
+
+            response = requests.get(api_url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"GitHub API returned status code {response.status_code}: {response.text}")
+                return False, None, None
+
             response.raise_for_status()
-            uploads_data = response.json()
+            release_data = response.json()
 
-            if 'uploads' not in uploads_data:
-                logger.warning("No uploads found in API response")
+            tag = release_data.get("tag_name", "") or release_data.get("name", "")
+            if not tag:
+                logger.error("No tag_name or name found in release data")
                 return False, None, None
 
-            latest_upload = max(uploads_data['uploads'], key=lambda x: x.get('created_at', ''))
-            filename = latest_upload.get('filename', '')
-            version_match = re.search(r'v(\d+\.\d+(?:\.\d+)?)', filename)
-
-            if not version_match:
-                logger.warning(f"Couldn't extract version from filename: {filename}")
-                return False, None, None
-
-            latest_version = version_match.group(1)
-            logger.info(f"Latest version available: {latest_version}")
+            # Remove a leading "v" if present
+            if tag.lower().startswith("v"):
+                tag = tag[1:]
+            latest_version = tag.strip()
+            logger.info(f"Latest version on GitHub: {latest_version}")
 
             current_ver = version.parse(self.current_version)
-            latest_ver = version.parse(latest_version)
+            latest_ver = version.parse(latest_version) if latest_version else version.parse("0")
 
-            # Check if the upload has a direct download URL or we need to auth
-            self.download_url = latest_upload.get('download_url')
+            if latest_version and latest_ver > current_ver:
+                assets = release_data.get("assets", [])
+                if assets:
+                    logger.info(f"Found {len(assets)} assets in release:")
+                    for asset in assets:
+                        logger.info(f"  - {asset.get('name', 'unnamed')}: {asset.get('browser_download_url', 'no URL')}")
+                else:
+                    logger.error("No assets found in release data")
+                    return False, latest_version, None
 
-            if latest_ver > current_ver:
-                self.latest_version = latest_version
-                return True, latest_version, filename
-            return False, latest_version, None
+                zip_asset = None
+                for asset in assets:
+                    name = asset.get("name", "")
+                    if name.lower().endswith(".zip"):
+                        zip_asset = asset
+                        break
 
+                if zip_asset:
+                    self.download_url = zip_asset.get("browser_download_url")
+                    logger.info(f"Found update ZIP: {zip_asset.get('name')}")
+                    logger.info(f"Download URL: {self.download_url}")
+                    self.latest_version = latest_version
+                    return True, latest_version, zip_asset.get("name", None)
+                else:
+                    logger.error("No ZIP asset found in release assets")
+                    return False, latest_version, None
+            else:
+                logger.info(f"No update needed. Current: {current_ver}, Latest: {latest_ver}")
+                return False, latest_version, None
         except requests.RequestException as e:
             logger.error(f"Error checking for updates: {e}")
             return False, None, None
         except Exception as e:
             logger.error(f"Unexpected error checking for updates: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False, None, None
 
     def _download_file(self, url, target_path, progress_callback=None):
-        """Download a file with progress tracking"""
         try:
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
+            logger.info(f"Attempting to download from: {url}")
+            import re
+            url_pattern = r"https://github.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)"
+            match = re.match(url_pattern, url)
 
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 8192
-            downloaded = 0
+            if not match:
+                logger.error(f"Could not parse URL: {url}")
+                return self._try_direct_download(url, target_path, progress_callback)
 
+            owner, repo, tag, filename = match.groups()
+            logger.info(f"Parsed URL components: owner={owner}, repo={repo}, tag={tag}, filename={filename}")
+
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"LacesUpdater/{self.current_version}"
+            }
+
+            if self.github_token:
+                headers["Authorization"] = f"Bearer {self.github_token}"
+                logger.info("Using authentication token for API access")
+            else:
+                logger.warning("No GitHub token provided - this will fail for private repositories")
+                return False
+
+            api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+            logger.info(f"Requesting release info from API: {api_url}")
+
+            response = requests.get(api_url, headers=headers, timeout=30)
+            if response.status_code != 200:
+                logger.error(f"API request failed with status {response.status_code}: {response.text}")
+                return self._try_direct_download(url, target_path, progress_callback)
+
+            release_data = response.json()
+
+            asset_id = None
+            browser_download_url = None
+
+            for asset in release_data.get("assets", []):
+                asset_name = asset.get("name", "")
+                logger.info(f"Found asset: {asset_name}")
+                if asset_name == filename:
+                    asset_id = asset.get("id")
+                    browser_download_url = asset.get("browser_download_url")
+                    logger.info(f"Found matching asset with ID: {asset_id}")
+                    break
+
+            if not asset_id:
+                logger.error(f"Could not find asset matching {filename} in release {tag}")
+                return False
+
+            download_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
+            logger.info(f"Using API endpoint for download: {download_url}")
+
+            download_headers = headers.copy()
+            download_headers["Accept"] = "application/octet-stream"
+
+            logger.info("Initiating download...")
+            response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+
+            if response.status_code != 200:
+                logger.error(f"Download request failed: {response.status_code} - {response.text}")
+                if browser_download_url:
+                    logger.info(f"Trying browser_download_url as fallback: {browser_download_url}")
+                    direct_response = requests.get(browser_download_url, headers=headers, stream=True, timeout=60)
+                    if direct_response.status_code == 200:
+                        return self._save_download_stream(direct_response, target_path, progress_callback)
+                return False
+
+            return self._save_download_stream(response, target_path, progress_callback)
+
+        except Exception as e:
+            logger.error(f"Error in download process: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+    def _save_download_stream(self, response, target_path, progress_callback=None):
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 8192
+        downloaded = 0
+
+        try:
             with open(target_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     if self.cancel_update:
@@ -100,128 +210,170 @@ class AutoUpdater:
                         if progress_callback and total_size:
                             progress = (downloaded / total_size) * 100
                             progress_callback(progress)
-
             return True
         except Exception as e:
-            logger.error(f"Error downloading file: {e}")
+            logger.error(f"Error saving download: {e}")
+            return False
+
+    def _try_direct_download(self, url, target_path, progress_callback=None):
+        logger.info(f"Attempting direct download from: {url}")
+        try:
+            headers = {}
+            if self.github_token:
+                headers["Authorization"] = f"Bearer {self.github_token}"
+                headers["User-Agent"] = f"LacesUpdater/{self.current_version}"
+
+            response = requests.get(url, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+            return self._save_download_stream(response, target_path, progress_callback)
+        except Exception as e:
+            logger.error(f"Direct download failed: {e}")
             return False
 
     def _create_updater_script(self, update_zip_path):
-        """Create a Python script that will replace the current executable with the new one"""
         updater_path = os.path.join(self.temp_dir, "run_updater.py")
 
         app_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
         app_dir = os.path.dirname(app_path)
+        app_name = os.path.basename(app_path)
 
-        # Wait for the main app to exit and then extract files
+        user_temp = tempfile.gettempdir()
+        log_file = os.path.join(user_temp, "laces_updater_log.txt")
+
         updater_code = f'''
 import os
 import sys
 import time
-import shutil
 import zipfile
+import shutil
 import subprocess
 import logging
+import traceback
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename='{os.path.join(self.temp_dir, "updater_log.txt")}',
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename=r"{log_file}",
     filemode='w'
 )
 
 UPDATE_ZIP = r"{update_zip_path}"
 APP_DIR = r"{app_dir}"
 APP_PATH = r"{app_path}"
+APP_NAME = r"{app_name}"
 
 def main():
-    logging.info("Updater script starting")
+    logging.info("Executable replacement updater starting")
+    logging.info(f"Current executable: {{APP_PATH}}")
+    logging.info(f"Update ZIP: {{UPDATE_ZIP}}")
 
-    # Wait for the main process to exit
-    time.sleep(2)
+    time.sleep(3)
 
     try:
-        # Create backup directory
-        backup_dir = os.path.join(APP_DIR, "backup_" + str(int(time.time())))
-        os.makedirs(backup_dir, exist_ok=True)
-        logging.info(f"Created backup directory: {{backup_dir}}")
-
-        # Extract the update to a temp directory
-        extract_dir = os.path.join(os.path.dirname(UPDATE_ZIP), "extracted")
-        os.makedirs(extract_dir, exist_ok=True)
+        import tempfile
+        extract_dir = tempfile.mkdtemp(prefix="laces_update_")
         logging.info(f"Extracting update to: {{extract_dir}}")
 
         with zipfile.ZipFile(UPDATE_ZIP, 'r') as zip_ref:
+            for file_info in zip_ref.infolist():
+                logging.info(f"ZIP contains: {{file_info.filename}}")
             zip_ref.extractall(extract_dir)
 
-        # Copy files from the extracted directory to the application directory
-        logging.info("Copying new files to application directory")
+        new_exe = None
         for root, dirs, files in os.walk(extract_dir):
             for file in files:
-                src_path = os.path.join(root, file)
-                rel_path = os.path.relpath(src_path, extract_dir)
-                dst_path = os.path.join(APP_DIR, rel_path)
+                if file.lower().endswith(".exe"):
+                    new_exe = os.path.join(root, file)
+                    logging.info(f"Found new executable: {{new_exe}}")
+                    break
+            if new_exe:
+                break
 
-                # If the file exists, back it up first
-                if os.path.exists(dst_path):
-                    backup_path = os.path.join(backup_dir, rel_path)
-                    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-                    shutil.copy2(dst_path, backup_path)
+        if not new_exe:
+            logging.error("No executable found in the update package!")
+            return
 
-                # Make sure the destination directory exists
-                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        backup_path = os.path.join(APP_DIR, f"{{APP_NAME}}.backup")
+        logging.info(f"Creating backup: {{backup_path}}")
+        try:
+            shutil.copy2(APP_PATH, backup_path)
+            logging.info("Backup created successfully")
+        except Exception as e:
+            logging.error(f"Failed to create backup: {{e}}")
 
-                # Copy the new file
-                shutil.copy2(src_path, dst_path)
-
-        # Start the updated application
+        logging.info(f"Replacing {{APP_PATH}} with {{new_exe}}")
+        try:
+            if os.path.exists(APP_PATH):
+                os.remove(APP_PATH)
+                logging.info(f"Deleted old executable: {{APP_PATH}}")
+            shutil.copy2(new_exe, APP_PATH)
+            logging.info("Executable replaced successfully")
+        except PermissionError:
+            if sys.platform == 'win32':
+                logging.info("Permission error encountered - falling back to batch file approach")
+                bat_path = os.path.join(extract_dir, "update.bat")
+                windows_new_exe = new_exe.replace('/', '\\\\')
+                windows_app_path = APP_PATH.replace('/', '\\\\')
+                windows_extract_dir = extract_dir.replace('/', '\\\\')
+                batch_content = (
+                    '@echo off\\n'
+                    'echo Waiting for file handles to be released...\\n'
+                    'timeout /t 2 /nobreak > nul\\n'
+                    'echo Deleting old executable...\\n'
+                    f'del /F /Q "{{windows_app_path}}"\\n'
+                    'echo Copying new executable...\\n'
+                    f'copy /Y "{{windows_new_exe}}" "{{windows_app_path}}"\\n'
+                    'echo Starting application...\\n'
+                    f'start "" "{{windows_app_path}}"\\n'
+                    'echo Cleaning up...\\n'
+                    f'rmdir /S /Q "{{windows_extract_dir}}"\\n'
+                    'del "%~f0"\\n'
+                )
+                with open(bat_path, 'w') as bat:
+                    bat.write(batch_content)
+                logging.info(f"Executing batch file: {{bat_path}}")
+                subprocess.Popen(["cmd.exe", "/c", bat_path],
+                                 shell=True,
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+                return
+            else:
+                raise
         logging.info("Starting updated application")
         subprocess.Popen([APP_PATH])
-
-        # Clean up
         logging.info("Cleaning up temporary files")
-        shutil.rmtree(extract_dir, ignore_errors=True)
-
+        try:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        except Exception as cleanup_error:
+            logging.error(f"Cleanup error: {{cleanup_error}}")
         logging.info("Update completed successfully")
     except Exception as e:
         logging.error(f"Error during update: {{e}}")
-        # Try to restore from backup in case of failure
-        try:
-            if 'backup_dir' in locals():
-                logging.info("Attempting to restore from backup")
-                for root, dirs, files in os.walk(backup_dir):
-                    for file in files:
-                        src_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(src_path, backup_dir)
-                        dst_path = os.path.join(APP_DIR, rel_path)
-                        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-                        shutil.copy2(src_path, dst_path)
-                logging.info("Restoration from backup completed")
+        logging.error(traceback.format_exc())
+        if os.path.exists(backup_path):
+            logging.info("Attempting to restore from backup")
+            try:
+                shutil.copy2(backup_path, APP_PATH)
+                logging.info("Restoration completed")
                 subprocess.Popen([APP_PATH])
-        except Exception as restore_error:
-            logging.error(f"Error restoring from backup: {{restore_error}}")
+            except Exception as restore_error:
+                logging.error(f"Restoration failed: {{restore_error}}")
 
 if __name__ == "__main__":
     main()
 '''
-
         with open(updater_path, 'w') as f:
             f.write(updater_code)
-
         return updater_path
 
     def download_update(self, parent_window=None):
-        """Download the update package"""
         try:
             if not self.download_url:
                 logger.error("No download URL available")
                 return False
 
-            # Create a temporary directory for the download
             self.temp_dir = tempfile.mkdtemp(prefix="app_update_")
             download_path = os.path.join(self.temp_dir, f"update_v{self.latest_version}.zip")
 
-            # Show a progress dialog
             if parent_window:
                 self.progress_dialog = tk.Toplevel(parent_window)
                 self.progress_dialog.title("Downloading Update")
@@ -230,20 +382,17 @@ if __name__ == "__main__":
                 self.progress_dialog.transient(parent_window)
                 self.progress_dialog.grab_set()
 
-                # Center the dialog
                 parent_window.update_idletasks()
                 x = parent_window.winfo_x() + (parent_window.winfo_width() // 2) - 200
                 y = parent_window.winfo_y() + (parent_window.winfo_height() // 2) - 75
                 self.progress_dialog.geometry(f"+{x}+{y}")
 
-                # Add progress elements
                 tk.Label(self.progress_dialog,
                          text=f"Downloading update v{self.latest_version}...").pack(pady=(20, 10))
                 self.progress_bar = ttk.Progressbar(self.progress_dialog,
                                                     length=350, mode="determinate")
                 self.progress_bar.pack(pady=10, padx=20)
 
-                # Add cancel button
                 cancel_button = tk.Button(self.progress_dialog, text="Cancel",
                                           command=self._cancel_download)
                 cancel_button.pack(pady=10)
@@ -253,7 +402,6 @@ if __name__ == "__main__":
                         self.progress_bar["value"] = progress
                         self.progress_dialog.update_idletasks()
 
-                # Start download in a separate thread
                 import threading
                 download_thread = threading.Thread(
                     target=self._threaded_download,
@@ -262,11 +410,9 @@ if __name__ == "__main__":
                 download_thread.daemon = True
                 download_thread.start()
 
-                # Wait for the download to complete or be cancelled
                 self.progress_dialog.wait_window()
                 return self.update_ready
             else:
-                # No GUI mode
                 logger.info(f"Downloading update to {download_path}")
                 success = self._download_file(self.download_url, download_path)
                 if success:
@@ -282,8 +428,9 @@ if __name__ == "__main__":
             return False
 
     def _threaded_download(self, url, target_path, progress_callback, parent_window):
-        """Handle downloading in a separate thread"""
+        logger.info(f"Starting download from: {url}")
         success = self._download_file(url, target_path, progress_callback)
+        logger.info(f"Download completed with success={success}")
 
         if self.cancel_update:
             if self.progress_dialog and self.progress_dialog.winfo_exists():
@@ -296,12 +443,8 @@ if __name__ == "__main__":
 
             if self.progress_dialog and self.progress_dialog.winfo_exists():
                 self.progress_dialog.destroy()
-
-                # Ask the user if they want to install now
                 if messagebox.askyesno("Update Ready",
-                                       f"Update v{self.latest_version} has been downloaded. "
-                                       f"Do you want to install it now? "
-                                       f"The application will restart.",
+                                       f"Update v{self.latest_version} has been downloaded. Do you want to install it now? The application will restart.",
                                        parent=parent_window):
                     self.install_update(parent_window)
         else:
@@ -312,34 +455,27 @@ if __name__ == "__main__":
                                  parent=parent_window)
 
     def _cancel_download(self):
-        """Cancel the download process"""
         self.cancel_update = True
         if self.progress_dialog:
             self.progress_dialog.title("Cancelling...")
 
     def install_update(self, parent_window=None):
-        """Install the downloaded update"""
         if not self.update_ready or not hasattr(self, 'updater_script_path'):
             logger.error("No update ready to install")
             return False
 
         try:
-            # Run the updater script
             logger.info("Starting the updater script")
             if sys.platform == 'win32':
-                # Hide console window
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                subprocess.Popen([sys.executable, self.updater_script_path],
+                subprocess.Popen(self.updater_script_path,
+                                 shell=True,
                                  startupinfo=startupinfo)
             else:
-                subprocess.Popen([sys.executable, self.updater_script_path])
-
-            # Close the application to allow the updater to replace files
+                subprocess.Popen(["bash", self.updater_script_path])
             if parent_window:
                 parent_window.destroy()
-
-            # Exit the application
             sys.exit(0)
 
         except Exception as e:

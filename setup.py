@@ -38,7 +38,7 @@ executables = [
 
 setup(
     name="Laces-Total-File-Converter",
-    version="2.1.1",
+    version="2.3.2",
     description="Video downloader and file converter",
     options={
         "build_exe": build_exe_options,
