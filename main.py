@@ -33,7 +33,7 @@ import vlc
 logging.basicConfig(level=logging.INFO)
 
 # Application Constants
-CURRENT_VERSION = "2.4.1"
+CURRENT_VERSION = "2.4.2"
 ITCH_GAME_URL = "https://laceediting.itch.io/laces-total-file-converter"
 MAX_RECENT_FOLDERS = 5
 SETTINGS_FILE = "app_settings.json"
@@ -494,33 +494,105 @@ def get_notification_sound_path() -> Optional[str]:
 @handle_errors(default_return=False, show_messagebox=False)
 def play_notification(audio_path: Optional[str] = None, duration: int = NOTIFICATION_DURATION) -> bool:
     """Play an audio notification when operations complete"""
-    player = VLCManager.get_audio_player()
-    if not player:
-        return False
-
-    instance = VLCManager.get_instance()
-    if not instance:
-        return False
-
-    # Use provided path or default notification sound
-    if audio_path is None:
-        audio_path = get_notification_sound_path()
-        if not audio_path:
+    try:
+        # Get the VLC instance first
+        instance = VLCManager.get_instance()
+        if not instance:
+            logging.error("Could not get VLC instance for notification")
             return False
 
-    media = instance.media_new(audio_path)
-    player.set_media(media)
-    player.play()
-    logging.info(f"Playing audio notification: {audio_path}")
+        # Use provided path or default notification sound
+        if audio_path is None:
+            audio_path = get_notification_sound_path()
+            if not audio_path:
+                logging.error("No notification sound path found")
+                return False
 
-    # Stop after duration
-    def stop_playback():
-        time.sleep(duration)
-        player.stop()
-        logging.info("Audio notification playback ended")
+        # Create a new player for each notification to avoid conflicts
+        player = instance.media_player_new()
 
-    threading.Thread(target=stop_playback, daemon=True).start()
-    return True
+        # Create and set the media
+        media = instance.media_new(audio_path)
+        player.set_media(media)
+
+        # Set volume (0-100)
+        player.audio_set_volume(70)
+
+        # Play the notification
+        player.play()
+        logging.info(f"Playing audio notification: {audio_path}")
+
+        # Stop after duration and clean up
+        def stop_and_cleanup():
+            time.sleep(duration)
+            player.stop()
+            player.release()
+            logging.info("Audio notification playback ended")
+
+        threading.Thread(target=stop_and_cleanup, daemon=True).start()
+        return True
+
+    except Exception as e:
+        logging.error(f"Error playing audio notification: {e}")
+        return False
+
+
+class VLCManager:
+    """Manages VLC instances for better performance"""
+    _instance = None
+    _video_player = None
+
+    # Remove _audio_player = None
+
+    @classmethod
+    def get_instance(cls):
+        """Get or create the singleton VLC instance"""
+        if cls._instance is None:
+            try:
+                # Remove --no-video-ui flag as it might interfere with audio
+                cls._instance = vlc.Instance("--quiet")
+                logging.info("VLC instance created")
+            except Exception as e:
+                logging.error(f"Failed to create VLC instance: {e}")
+                cls._instance = None
+        return cls._instance
+
+    @classmethod
+    def get_video_player(cls):
+        """Get or create a video player"""
+        instance = cls.get_instance()
+        if instance and cls._video_player is None:
+            cls._video_player = instance.media_player_new()
+        return cls._video_player
+
+    # Remove get_audio_player method since we're creating new players for each notification
+
+    @classmethod
+    def cleanup(cls):
+        """Clean up VLC resources"""
+        if cls._video_player:
+            cls._video_player.stop()
+            cls._video_player.release()
+        cls._instance = None
+        cls._video_player = None
+
+def initialize_audio_system():
+    """Initialize the audio system by testing VLC"""
+    try:
+        # Test VLC instance creation
+        instance = VLCManager.get_instance()
+        if instance:
+            logging.info("Audio system initialized successfully")
+            # Pre-load the notification sound path to verify it exists
+            sound_path = get_notification_sound_path()
+            if sound_path:
+                logging.info(f"Notification sound found at: {sound_path}")
+            else:
+                logging.warning("No notification sound file found")
+        else:
+            logging.error("Failed to initialize audio system")
+    except Exception as e:
+        logging.error(f"Error initializing audio system: {e}")
 
 
 # Update checking functions
@@ -2157,7 +2229,6 @@ def create_ui_components() -> None:
     app_state.app.grid_rowconfigure(0, weight=1)
     app_state.app.grid_columnconfigure(0, weight=1)
 
-
 def main():
     """Main application entry point"""
     global app_state
@@ -2199,6 +2270,9 @@ def main():
 
         # Set initial output folder
         initialize_output_folder()
+
+        # Initialize audio system after UI is ready
+        app_state.app.after(500, initialize_audio_system)
 
         # Start the main loop
         app_state.app.mainloop()
