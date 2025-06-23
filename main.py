@@ -33,7 +33,7 @@ import vlc
 logging.basicConfig(level=logging.INFO)
 
 # Application Constants
-CURRENT_VERSION = "2.4.3"
+CURRENT_VERSION = "2.5.0"
 ITCH_GAME_URL = "https://laceediting.itch.io/laces-total-file-converter"
 MAX_RECENT_FOLDERS = 5
 SETTINGS_FILE = "app_settings.json"
@@ -1218,34 +1218,34 @@ def format_time(seconds: float) -> str:
 def get_format_string(quality: str, format_type: str) -> str:
     """
     Returns the format string for yt-dlp based on selected quality and format type
-    Now prioritizes H.264 codec for Premiere Pro compatibility
+    Now with more flexible H.264 preference that won't fail if H.264 isn't available
     """
     if format_type in AUDIO_FORMATS:
         return "bestaudio/best"
 
-    # For video, explicitly prefer H.264 (avc1) codec over VP9 for Premiere compatibility
+    # For video, prefer H.264 but fall back to other codecs if not available
     if format_type == "mp4":
-        # Format strings that explicitly prefer H.264/AVC codec
+        # More flexible format strings that prefer H.264 but don't require it
         quality_map = {
-            "Best": "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[vcodec^=avc1]/best[ext=mp4]/best",
-            "4K": "bestvideo[height<=2160][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=2160][vcodec^=avc1]+bestaudio/best[height<=2160][vcodec^=avc1]/best[height<=2160][ext=mp4]/best[height<=2160]",
-            "1440p": "bestvideo[height<=1440][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=1440][vcodec^=avc1]+bestaudio/best[height<=1440][vcodec^=avc1]/best[height<=1440][ext=mp4]/best[height<=1440]",
-            "1080p": "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][vcodec^=avc1]/best[height<=1080][ext=mp4]/best[height<=1080]",
-            "720p": "bestvideo[height<=720][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=720][vcodec^=avc1]+bestaudio/best[height<=720][vcodec^=avc1]/best[height<=720][ext=mp4]/best[height<=720]",
-            "480p": "bestvideo[height<=480][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480][vcodec^=avc1]/best[height<=480][ext=mp4]/best[height<=480]"
+            "Best": "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+            "4K": "bestvideo[height<=2160][ext=mp4][vcodec^=avc]+bestaudio/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+            "1440p": "bestvideo[height<=1440][ext=mp4][vcodec^=avc]+bestaudio/bestvideo[height<=1440][ext=mp4]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+            "1080p": "bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio/bestvideo[height<=1080][ext=mp4]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "720p": "bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio/bestvideo[height<=720][ext=mp4]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
+            "480p": "bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio/bestvideo[height<=480][ext=mp4]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]"
         }
-        return quality_map.get(quality, "bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][vcodec^=avc1]/best")
+        return quality_map.get(quality, "bestvideo[height<=1080][ext=mp4]+bestaudio/bestvideo[height<=1080]+bestaudio/best")
     else:
-        # For other formats, still prefer H.264 when possible
+        # For other formats, standard selection
         quality_map = {
-            "Best": "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best",
-            "4K": "bestvideo[height<=2160][vcodec^=avc1]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
-            "1440p": "bestvideo[height<=1440][vcodec^=avc1]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]",
-            "1080p": "bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-            "720p": "bestvideo[height<=720][vcodec^=avc1]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
-            "480p": "bestvideo[height<=480][vcodec^=avc1]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]"
+            "Best": "bestvideo+bestaudio/best",
+            "4K": "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+            "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+            "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+            "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]"
         }
-        return quality_map.get(quality, "bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best")
+        return quality_map.get(quality, "bestvideo[height<=1080]+bestaudio/best")
 
 
 def modify_download_options(ydl_opts: Dict[str, Any], quality: str, format_type: str,
@@ -1322,73 +1322,29 @@ def modify_download_options(ydl_opts: Dict[str, Any], quality: str, format_type:
             })
 
         else:
-            # Video format handling with Premiere compatibility
+            # Video format handling
             format_string = get_format_string(quality, format_type)
+
+            # Basic video options
+            ydl_opts.update({
+                'format': format_string,
+                'merge_output_format': format_type,
+                'postprocessors': []
+            })
 
             # For YouTube, always set merge_output_format
             if "youtube.com" in netloc or "youtu.be" in netloc:
-                ydl_opts.update({
-                    'format': format_string,
-                    'merge_output_format': format_type,
-                    'postprocessors': []
-                })
-
-                # For MP4 files, ensure H.264 encoding for Premiere compatibility
                 if format_type == 'mp4' and premiere_compatible:
-                    # Add a post-processor to re-encode to H.264 if needed
-                    ydl_opts['postprocessors'].append({
-                        'key': 'FFmpegVideoConvertor',
-                        'preferedformat': 'mp4'
-                    })
-
-                    # Force re-encoding to H.264 if the video comes in as VP9
-                    ydl_opts['postprocessor_args'] = {
-                        'FFmpegVideoConvertor': [
-                            '-c:v', 'libx264',  # Force H.264 codec
-                            '-preset', 'medium',  # Balance between speed and quality
-                            '-crf', '23',  # Quality setting (lower = better quality)
-                            '-c:a', 'aac',  # AAC audio codec
-                            '-b:a', '192k',  # Audio bitrate
-                            '-movflags', '+faststart'  # Enable fast start for web playback
-                        ]
-                    }
-
-                    # Also add a check to see if re-encoding is needed
-                    def check_and_convert_vp9(filepath):
-                        """Check if video is VP9 and convert to H.264 if needed"""
-                        try:
-                            # Check codec using ffprobe
-                            probe_cmd = [ffprobe_path, '-v', 'error', '-select_streams', 'v:0',
-                                         '-show_entries', 'stream=codec_name', '-of',
-                                         'default=noprint_wrappers=1:nokey=1',
-                                         filepath]
-                            result = subprocess.run(probe_cmd, capture_output=True, text=True)
-                            codec = result.stdout.strip()
-
-                            if codec == 'vp9' or codec == 'vp09':
-                                # Re-encode to H.264
-                                temp_output = filepath + '.temp.mp4'
-                                convert_cmd = [
-                                    ffmpeg_path, '-i', filepath,
-                                    '-c:v', 'libx264',
-                                    '-preset', 'medium',
-                                    '-crf', '23',
-                                    '-c:a', 'aac',
-                                    '-b:a', '192k',
-                                    '-movflags', '+faststart',
-                                    '-y', temp_output
-                                ]
-
-                                subprocess.run(convert_cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-                                os.replace(temp_output, filepath)
-                                logging.info(f"Converted VP9 video to H.264 for Premiere compatibility: {filepath}")
-                        except Exception as e:
-                            logging.error(f"Error checking/converting codec: {e}")
-
-                    # Store the conversion function for later use
-                    ydl_opts['_premiere_post_process'] = check_and_convert_vp9
+                    # Store paths for post-processing
+                    ydl_opts['_ffmpeg_path'] = ffmpeg_path
+                    ydl_opts['_ffprobe_path'] = ffprobe_path
+                    ydl_opts['_check_codec'] = True
 
                 elif format_type == 'webm':
+                    ydl_opts['postprocessors'].append({
+                        'key': 'FFmpegVideoRemuxer',
+                        'preferedformat': 'webm'
+                    })
                     ydl_opts['postprocessor_args'] = {
                         'FFmpegVideoRemuxer': [
                             '-c:v', 'libvpx-vp9',
@@ -1399,6 +1355,10 @@ def modify_download_options(ydl_opts: Dict[str, Any], quality: str, format_type:
                         ]
                     }
                 elif format_type == 'avi':
+                    ydl_opts['postprocessors'].append({
+                        'key': 'FFmpegVideoRemuxer',
+                        'preferedformat': 'avi'
+                    })
                     ydl_opts['postprocessor_args'] = {
                         'FFmpegVideoRemuxer': [
                             '-c:v', 'mpeg4',
@@ -1418,22 +1378,83 @@ def modify_download_options(ydl_opts: Dict[str, Any], quality: str, format_type:
                     }]
                 })
 
-        # Add better error reporting
-        ydl_opts['logger'] = logging.getLogger('yt-dlp')
-        ydl_opts['verbose'] = True
+        # Improved error handling
+        ydl_opts['ignoreerrors'] = False  # Don't ignore errors so we can see what's wrong
+        ydl_opts['verbose'] = False  # Less verbose output
 
         return ydl_opts
+
     except Exception as e:
         logging.error(f"Error in modify_download_options: {e}", exc_info=True)
         # Return basic options as fallback
         return {
-            'format': 'bestvideo[vcodec^=avc1]+bestaudio/best',
+            'format': 'bestvideo+bestaudio/best',
             'merge_output_format': format_type,
             'outtmpl': '%(title)s.%(ext)s',
             'noplaylist': True if playlist_action == 'single' else False,
             'ffmpeg_location': ffmpeg_path,
             'progress_hooks': ydl_opts.get('progress_hooks', [])
         }
+
+
+def check_and_convert_codec(filepath: str, ffmpeg_path: str, ffprobe_path: str) -> bool:
+    """Check if video needs H.264 conversion for Premiere compatibility"""
+    try:
+        if not os.path.exists(filepath):
+            return False
+
+        # Check codec using ffprobe
+        probe_cmd = [ffprobe_path, '-v', 'error', '-select_streams', 'v:0',
+                     '-show_entries', 'stream=codec_name', '-of',
+                     'default=noprint_wrappers=1:nokey=1', filepath]
+
+        if sys.platform == 'win32':
+            result = subprocess.run(probe_cmd, capture_output=True, text=True,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            result = subprocess.run(probe_cmd, capture_output=True, text=True)
+
+        codec = result.stdout.strip().lower()
+
+        # Check if conversion is needed
+        if codec in ['vp9', 'vp09', 'av01', 'vp8']:
+            logging.info(f"Converting {codec} to H.264 for Premiere compatibility")
+
+            # Create temp file
+            temp_output = filepath + '.temp.mp4'
+
+            # Conversion command
+            convert_cmd = [
+                ffmpeg_path, '-i', filepath,
+                '-c:v', 'libx264',  # H.264 codec
+                '-preset', 'fast',  # Faster conversion
+                '-crf', '18',  # Higher quality
+                '-c:a', 'aac',  # AAC audio
+                '-b:a', '256k',  # Higher audio bitrate
+                '-movflags', '+faststart',
+                '-y', temp_output
+            ]
+
+            if sys.platform == 'win32':
+                subprocess.run(convert_cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                subprocess.run(convert_cmd, check=True)
+
+            # Replace original with converted file
+            os.replace(temp_output, filepath)
+            logging.info(f"Successfully converted to H.264: {filepath}")
+            return True
+
+    except Exception as e:
+        logging.error(f"Error during codec conversion: {e}")
+        # Clean up temp file if it exists
+        temp_file = filepath + '.temp.mp4'
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+    return False
 
 
 def yt_dlp_progress_hook(d: Dict[str, Any]) -> None:
@@ -1539,17 +1560,28 @@ def yt_dlp_progress_hook(d: Dict[str, Any]) -> None:
 
 
 def handle_download_error(error: Exception):
-    """Centralized download error handling"""
+    """Centralized download error handling with better error messages"""
     error_str = str(error).lower()
+    full_error = str(error)
+
+    # Log the full error for debugging
+    logging.error(f"Download error details: {full_error}")
 
     error_handlers = {
-        "throttling": ("YouTube Error", "YouTube is rate limiting downloads. Please try again later."),
+        "throttling": ("YouTube Error", "YouTube is rate limiting downloads. Please wait a few minutes and try again."),
         "copyright": ("Copyright Restriction", "This content is restricted due to copyright."),
         "private": ("Content Unavailable", "This content is private or unavailable."),
-        "unavailable": ("Content Unavailable", "This content is private or unavailable."),
+        "unavailable": ("Content Unavailable", "This content is not available."),
         "network": ("Network Error", "Connection failed. Please check your internet connection."),
         "connection": ("Network Error", "Connection failed. Please check your internet connection."),
         "timeout": ("Network Error", "Connection timed out. Please try again."),
+        "429": ("Rate Limited", "Too many requests. Please wait a few minutes before trying again."),
+        "403": ("Access Denied", "Access denied. The video might be private or region-restricted."),
+        "404": ("Not Found", "Video not found. Please check the URL."),
+        "nsig": ("YouTube Error",
+                 "YouTube signature extraction failed. This is a known issue - please try updating yt-dlp."),
+        "format": ("Format Error",
+                   "The requested format is not available. Try selecting a different quality or format."),
     }
 
     for keyword, (title, message) in error_handlers.items():
@@ -1557,8 +1589,14 @@ def handle_download_error(error: Exception):
             show_error(title, message)
             return
 
-    # Default error
-    show_error("Download Error", f"Failed to download: {str(error)}\n\nPlease try again or check for updates.")
+    # Default error - show more details
+    show_error("Download Error",
+               f"Failed to download: {full_error}\n\n"
+               "Common solutions:\n"
+               "1. Try a different quality setting\n"
+               "2. Check if the video is available in your region\n"
+               "3. Wait a few minutes if you've been downloading many videos\n"
+               "4. Check for updates to the application")
 
 
 def create_or_update_progress_bar():
@@ -1590,6 +1628,7 @@ def create_or_update_progress_bar():
         app_state.app.update_idletasks()
 
 
+
 def download_thread(input_url: str, output_folder: str, format_type: str,
                     quality: str, playlist_action: str):
     """Thread function for downloading videos"""
@@ -1619,7 +1658,7 @@ def download_thread(input_url: str, output_folder: str, format_type: str,
         ydl_opts = {
             'paths': {'home': output_folder, 'temp': output_folder},
             'progress_hooks': [yt_dlp_progress_hook],
-            'ignoreerrors': True,
+            'ignoreerrors': False,  # Changed to False to see errors
             'overwrites': True,
             'max_sleep_interval': 1,
             'min_sleep_interval': 1,
@@ -1714,8 +1753,25 @@ def download_thread(input_url: str, output_folder: str, format_type: str,
 
         # Start the download
         download_successful = False
+        downloaded_files = []
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Add a hook to track downloaded files
+                original_hooks = ydl_opts.get('progress_hooks', [])
+
+                def track_downloads(d):
+                    if d['status'] == 'finished':
+                        filename = d.get('filename', '')
+                        if filename and os.path.exists(filename):
+                            downloaded_files.append(filename)
+                    # Call original hooks
+                    for hook in original_hooks:
+                        hook(d)
+
+                ydl.add_progress_hook(track_downloads)
+
+                # Download
                 download_info = ydl.download([input_url])
 
                 # Check if download was successful
@@ -1723,28 +1779,9 @@ def download_thread(input_url: str, output_folder: str, format_type: str,
                     download_successful = True
                     logging.info("Download completed successfully")
 
-                    # For MP4 files, check if we need to convert VP9 to H.264
-                    if format_type == 'mp4' and '_premiere_post_process' in ydl_opts:
-                        safe_update_ui(lambda: app_state.youtube_status_label.config(
-                            text="Checking video codec for Premiere compatibility..."))
-
-                        # Find downloaded files
-                        import glob
-                        pattern = os.path.join(output_folder, "*.mp4")
-                        mp4_files = glob.glob(pattern)
-
-                        # Check files downloaded in the last 5 minutes
-                        recent_files = []
-                        current_time = time.time()
-                        for filepath in mp4_files:
-                            if os.path.getmtime(filepath) > (current_time - 300):  # 5 minutes
-                                recent_files.append(filepath)
-
-                        # Convert any VP9 files
-                        for filepath in recent_files:
-                            safe_update_ui(lambda: app_state.youtube_status_label.config(
-                                text=f"Ensuring Premiere compatibility for: {os.path.basename(filepath)}"))
-                            ydl_opts['_premiere_post_process'](filepath)
+                    # Post-process for Premiere compatibility if needed
+                    if format_type == 'mp4' and ydl_opts.get('_check_codec'):
+                        post_process_downloads(output_folder, format_type, ydl_opts)
 
                 else:
                     download_successful = False
@@ -1752,14 +1789,19 @@ def download_thread(input_url: str, output_folder: str, format_type: str,
 
         except yt_dlp.utils.DownloadError as e:
             download_successful = False
+            # Extract the actual error message
+            error_msg = str(e)
+            if "ERROR:" in error_msg:
+                error_msg = error_msg.split("ERROR:", 1)[1].strip()
+
+            logging.error(f"yt-dlp download error: {error_msg}")
             handle_download_error(e)
-            logging.error(f"Download error: {e}", exc_info=True)
 
         except Exception as e:
             download_successful = False
+            logging.error(f"Unexpected error in download_thread: {e}", exc_info=True)
             safe_update_ui(lambda: app_state.youtube_status_label.config(text="Error occurred!"))
             show_error("Error", f"An unexpected error occurred: {str(e)}\n\nPlease check logs for details.")
-            logging.error(f"Unexpected error in download_thread: {e}", exc_info=True)
 
         finally:
             safe_update_ui(lambda: toggle_interface(True))
@@ -1938,6 +1980,41 @@ def download_video():
                               daemon=True)
     thread.start()
 
+
+def post_process_downloads(output_folder: str, format_type: str, ydl_opts: Dict[str, Any]):
+    """Post-process downloaded files for codec compatibility"""
+    if format_type == 'mp4' and ydl_opts.get('_check_codec'):
+        try:
+            ffmpeg_path = ydl_opts.get('_ffmpeg_path')
+            ffprobe_path = ydl_opts.get('_ffprobe_path')
+
+            if ffmpeg_path and ffprobe_path:
+                safe_update_ui(lambda: app_state.youtube_status_label.config(
+                    text="Checking video compatibility..."))
+
+                # Find recently downloaded MP4 files
+                import glob
+                pattern = os.path.join(output_folder, "**", "*.mp4")
+                mp4_files = glob.glob(pattern, recursive=True)
+
+                # Check files downloaded in the last 10 minutes
+                current_time = time.time()
+                for filepath in mp4_files:
+                    try:
+                        if os.path.getmtime(filepath) > (current_time - 600):  # 10 minutes
+                            filename = os.path.basename(filepath)
+                            safe_update_ui(lambda: app_state.youtube_status_label.config(
+                                text=f"Ensuring compatibility: {filename[:40]}..."))
+
+                            # Check and convert if needed
+                            if check_and_convert_codec(filepath, ffmpeg_path, ffprobe_path):
+                                logging.info(f"Converted {filename} to H.264")
+
+                    except Exception as e:
+                        logging.error(f"Error processing {filepath}: {e}")
+
+        except Exception as e:
+            logging.error(f"Error in post-processing: {e}")
 
 # UI Event Handlers
 def on_drop(event) -> None:
